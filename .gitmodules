@@ -1,3 +1,9 @@
 [submodule "third_party/rapidjson"]
 	path = third_party/rapidjson
 	url = https://github.com/Tencent/rapidjson
+[submodule "third_party/lmdbxx"]
+	path = third_party/lmdbxx
+	url = https://github.com/hoytech/lmdbxx
+[submodule "third_party/lmdb"]
+	path = third_party/lmdb
+	url = https://github.com/LMDB/lmdb
