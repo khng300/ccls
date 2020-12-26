@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(ccls LANGUAGES CXX)
+project(ccls LANGUAGES C CXX)
 
 option(USE_SYSTEM_RAPIDJSON "Use system RapidJSON instead of the git submodule if exists" ON)
 
@@ -124,6 +124,16 @@ endif()
 if(LLVM_ENABLE_ZLIB)
   find_package(ZLIB)
 endif()
+
+set(lmdb_SRCDIR third_party/lmdb/libraries/liblmdb)
+add_library(lmdb STATIC
+  ${lmdb_SRCDIR}/mdb.c
+  ${lmdb_SRCDIR}/midl.c)
+target_include_directories(lmdb SYSTEM BEFORE INTERFACE ${lmdb_SRCDIR})
+
+target_link_libraries(ccls PRIVATE lmdb)
+target_include_directories(ccls PRIVATE
+  $<TARGET_PROPERTY:lmdb,INTERFACE_INCLUDE_DIRECTORIES>)
 
 ### Definitions
 

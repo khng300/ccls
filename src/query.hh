@@ -10,6 +10,7 @@
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/StringMap.h>
+#include <lmdbxx/lmdb++.h>
 
 namespace llvm {
 template <> struct DenseMapInfo<ccls::ExtentRef> {
@@ -181,6 +182,10 @@ struct DB {
   QueryFunc &getFunc(SymbolIdx ref) { return getFunc(ref.usr); }
   QueryType &getType(SymbolIdx ref) { return getType(ref.usr); }
   QueryVar &getVar(SymbolIdx ref) { return getVar(ref.usr); }
+};
+
+struct OnDiskDB {
+  std::vector<QueryFile> files;
 };
 
 Maybe<DeclRef> getDefinitionSpell(DB *db, SymbolIdx sym);
