@@ -614,9 +614,10 @@ public:
                        ? buf.size() && buf[0] == ':' ? Twine(" ", buf)
                                                      : Twine(" = ", buf)
                        : Twine();
-      Twine t = def.detailed_name + init;
+      Twine t = llvm::StringRef(def.detailed_name) + init;
       def.hover =
-          def.storage == SC_Static && strncmp(def.detailed_name, "static ", 7)
+          def.storage == SC_Static &&
+                  std::string_view(def.detailed_name).compare(0, 7, "static ")
               ? intern(("static " + t).str())
               : intern(t.str());
     }
@@ -687,7 +688,7 @@ public:
   IndexDataConsumer(IndexParam &param) : param(param) {}
   void initialize(ASTContext &ctx) override { this->ctx = param.ctx = &ctx; }
 #if LLVM_VERSION_MAJOR < 10 // llvmorg-10-init-12036-g3b9715cb219
-# define handleDeclOccurrence handleDeclOccurence
+#define handleDeclOccurrence handleDeclOccurence
 #endif
   bool handleDeclOccurrence(const Decl *d, index::SymbolRoleSet roles,
                             ArrayRef<index::SymbolRelation> relations,
@@ -794,7 +795,8 @@ public:
         entity->uses.push_back(use);
         return;
       }
-      if (entity->def.comments[0] == '\0' && g_config->index.comments)
+      if (std::string_view(entity->def.comments).empty() &&
+          g_config->index.comments)
         entity->def.comments = intern(getComment(origD));
     };
     switch (kind) {
@@ -817,7 +819,7 @@ public:
       do_def_decl(func);
       if (spell != src_loc)
         addMacroUse(db, sm, usr, Kind::Func, spell);
-      if (func->def.detailed_name[0] == '\0')
+      if (std::string_view(func->def.detailed_name).empty())
         setName(d, info->short_name, info->qualified, func->def);
       if (is_def || is_decl) {
         const Decl *dc = cast<Decl>(sem_dc);
@@ -836,7 +838,7 @@ public:
       do_def_decl(type);
       if (spell != src_loc)
         addMacroUse(db, sm, usr, Kind::Type, spell);
-      if ((is_def || type->def.detailed_name[0] == '\0') &&
+      if ((is_def || std::string_view(type->def.detailed_name).empty()) &&
           info->short_name.size()) {
         if (d->getKind() == Decl::TemplateTypeParm)
           type->def.detailed_name = intern(info->short_name);
@@ -856,7 +858,7 @@ public:
       do_def_decl(var);
       if (spell != src_loc)
         addMacroUse(db, sm, usr, Kind::Var, spell);
-      if (var->def.detailed_name[0] == '\0')
+      if (std::string_view(var->def.detailed_name).empty())
         setVarName(d, info->short_name, info->qualified, var->def);
       QualType t;
       if (auto *vd = dyn_cast<ValueDecl>(d))
@@ -885,10 +887,10 @@ public:
                 Usr usr1 = getUsr(d1, &info1);
                 IndexType &type1 = db->toType(usr1);
                 SourceLocation sl1 = d1->getLocation();
-                type1.def.spell = {
-                    Use{{fromTokenRange(sm, lang, {sl1, sl1}), Role::Definition},
-                        lid},
-                    fromTokenRange(sm, lang, sr1)};
+                type1.def.spell = {Use{{fromTokenRange(sm, lang, {sl1, sl1}),
+                                        Role::Definition},
+                                       lid},
+                                   fromTokenRange(sm, lang, sr1)};
                 type1.def.detailed_name = intern(info1->short_name);
                 type1.def.short_name_size = int16_t(info1->short_name.size());
                 type1.def.kind = SymbolKind::TypeParameter;
@@ -957,7 +959,8 @@ public:
     case Decl::Enum:
     case Decl::Record:
       if (auto *tag_d = dyn_cast<TagDecl>(d)) {
-        if (type->def.detailed_name[0] == '\0' && info->short_name.empty()) {
+        if (std::string_view(type->def.detailed_name).empty() &&
+            info->short_name.empty()) {
           StringRef tag;
           switch (tag_d->getTagKind()) {
           case TTK_Struct:
@@ -1056,13 +1059,16 @@ public:
       }
       break;
     case Decl::EnumConstant:
-      if (is_def && strchr(var->def.detailed_name, '=') == nullptr) {
+      if (is_def &&
+          std::string_view(var->def.detailed_name).find_first_of('=') ==
+              std::string_view::npos) {
         auto *ecd = cast<EnumConstantDecl>(d);
         const auto &val = ecd->getInitVal();
         std::string init =
             " = " + (val.isSigned() ? std::to_string(val.getSExtValue())
                                     : std::to_string(val.getZExtValue()));
-        var->def.hover = intern(var->def.detailed_name + init);
+        var->def.hover = intern(
+            std::string(std::string_view(var->def.detailed_name)) + init);
       }
       break;
     default:
@@ -1124,7 +1130,7 @@ public:
       SourceRange sr(mi->getDefinitionLoc(), mi->getDefinitionEndLoc());
       Range extent = fromTokenRange(sm, param.ctx->getLangOpts(), sr);
       var.def.spell = {Use{{range, Role::Definition}}, extent};
-      if (var.def.detailed_name[0] == '\0') {
+      if (std::string_view(var.def.detailed_name).empty()) {
         var.def.detailed_name = intern(name);
         var.def.short_name_size = name.size();
         StringRef buf = getSourceInRange(sm, lang, sr);
@@ -1208,7 +1214,7 @@ class IndexDiags : public DiagnosticConsumer {
 public:
   llvm::SmallString<64> message;
   void HandleDiagnostic(DiagnosticsEngine::Level level,
-    const clang::Diagnostic &info) override {
+                        const clang::Diagnostic &info) override {
     DiagnosticConsumer::HandleDiagnostic(level, info);
     if (message.empty())
       info.FormatDiagnostic(message);

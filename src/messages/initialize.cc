@@ -305,6 +305,14 @@ void do_initialize(MessageHandler *m, InitializeParam &param,
     }
   }
 
+  if (!g_config->cache.directory.empty()) {
+    sys::fs::create_directories(g_config->cache.directory);
+    m->map_file = db::impl::createManagedMappedFile(g_config->cache.directory);
+    auto allocator = db::getAlloc(m->map_file.get_segment_manager());
+    m->db = m->map_file.find_or_construct<DB>("DB")(allocator);
+    LOG_S(INFO) << "Database switched.";
+  }
+
   // Client capabilities
   const auto &capabilities = param.capabilities;
   g_config->client.hierarchicalDocumentSymbolSupport &=

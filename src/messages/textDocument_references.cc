@@ -100,19 +100,21 @@ void MessageHandler::textDocument_references(JsonReader &reader,
     std::string path;
     if (line == 0 || line >= (int)wf->buffer_lines.size() - 1)
       path = file->def->path;
-    for (const IndexInclude &include : file->def->includes)
+    for (const QueryFile::Def::IndexInclude &include : file->def->includes)
       if (include.line == param.position.line) {
         path = include.resolved_path;
         break;
       }
     if (path.size())
-      for (QueryFile &file1 : db->files)
+      for (auto &[_, file1] : db->files)
         if (file1.def)
-          for (const IndexInclude &include : file1.def->includes)
-            if (include.resolved_path == path) {
+          for (const QueryFile::Def::IndexInclude &include :
+               file1.def->includes)
+            if (db::toStdString(include.resolved_path) == path) {
               // Another file |file1| has the same include line.
               Location &loc = result.emplace_back();
-              loc.uri = DocumentUri::fromPath(file1.def->path);
+              loc.uri =
+                  DocumentUri::fromPath(db::toStdString(file1.def->path));
               loc.range.start.line = loc.range.end.line = include.line;
               break;
             }

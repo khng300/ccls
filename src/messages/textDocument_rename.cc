@@ -30,7 +30,7 @@ WorkspaceEdit buildWorkspaceEdit(DB *db, WorkingFiles *wfiles, SymbolRef sym,
     auto [it, inserted] = path2edit.try_emplace(file_id);
     auto &edit = it->second.second;
     if (inserted) {
-      const std::string &path = file.def->path;
+      auto path = db::toStdString(file.def->path);
       edit.textDocument.uri = DocumentUri::fromPath(path);
       if ((it->second.first = wfiles->getFile(path)))
         edit.textDocument.version = it->second.first->version;
