@@ -236,9 +236,9 @@ void reflectHoverAndComments(JsonReader &vis, Def &def) {
 template <typename Def>
 void reflectHoverAndComments(JsonWriter &vis, Def &def) {
   // Don't emit empty hover and comments in JSON test mode.
-  if (!gTestOutputMode || def.hover[0])
+  if (!gTestOutputMode || !std::string_view(def.hover).empty())
     reflectMember(vis, "hover", def.hover);
-  if (!gTestOutputMode || def.comments[0])
+  if (!gTestOutputMode || !std::string_view(def.comments).empty())
     reflectMember(vis, "comments", def.comments);
 }
 template <typename Def>
@@ -267,7 +267,8 @@ template <typename Def> void reflectShortName(JsonReader &vis, Def &def) {
 }
 template <typename Def> void reflectShortName(JsonWriter &vis, Def &def) {
   if (gTestOutputMode) {
-    std::string_view short_name(def.detailed_name + def.short_name_offset,
+    std::string_view short_name(std::string_view(def.detailed_name).data() +
+                                    def.short_name_offset,
                                 def.short_name_size);
     reflectMember(vis, "short_name", short_name);
   } else {

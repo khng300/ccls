@@ -7,9 +7,14 @@
 #include "serializer.hh"
 #include "working_files.hh"
 
+#include "db_allocator.hh"
+#include <boost/interprocess/containers/string.hpp>
+#include <scoped_allocator>
+
 #include <llvm/ADT/DenseMap.h>
-#include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/StringMap.h>
+
+#include <map>
 
 namespace llvm {
 template <> struct DenseMapInfo<ccls::ExtentRef> {
@@ -25,25 +30,147 @@ template <> struct DenseMapInfo<ccls::ExtentRef> {
 } // namespace llvm
 
 namespace ccls {
-struct QueryFile {
-  struct Def {
-    std::string path;
-    std::vector<const char *> args;
-    LanguageId language;
-    // Includes in the file.
-    std::vector<IndexInclude> includes;
-    // Parts of the file which are disabled.
-    std::vector<Range> skipped_ranges;
-    // Used by |$ccls/reload|.
-    std::vector<const char *> dependencies;
-  };
+namespace db {
+//
+// Begin of types
+//
+using Handle = impl::Handle;
+template <typename T> using allocator = impl::allocator<T>;
+template <typename T>
+using scoped_allocator = std::scoped_allocator_adaptor<allocator<T>>;
+inline allocator<void> getAlloc(Handle handle = {}) {
+  return allocator<void>(handle);
+}
 
-  using DefUpdate = std::pair<Def, std::string>;
+template <typename K, typename V>
+using scoped_map =
+    std::map<K, V, std::less<void>,
+             scoped_allocator<typename std::map<K, V>::value_type>>;
+template <typename K, typename V>
+using scoped_unordered_map =
+    std::unordered_map<K, V, std::hash<K>, std::equal_to<K>,
+                       scoped_allocator<typename std::map<K, V>::value_type>>;
+template <typename T> using scoped_vector = std::vector<T, scoped_allocator<T>>;
+using string = boost::interprocess::basic_string<char, std::char_traits<char>,
+                                                 allocator<char>>;
+
+inline std::string toStdString(const string &s) {
+  return std::string(s.begin(), s.end());
+}
+
+template <typename SV> inline string toInMemScopedString(SV &&s) {
+  return string(s.begin(), s.end(), getAlloc());
+}
+} // namespace db
+} // namespace ccls
+
+namespace std {
+template <> struct hash<ccls::db::string> {
+  size_t operator()(const ccls::db::string &t) const _NOEXCEPT {
+    return boost::container::hash_value(t);
+  }
+};
+} // namespace std
+
+namespace ccls {
+template <typename String, typename II, template <typename...> typename V>
+struct FileDef {
+  using IndexInclude = II;
+
+  String path;
+  V<String> args;
+  LanguageId language;
+  // Includes in the file.
+  V<IndexInclude> includes;
+  // Parts of the file which are disabled.
+  V<Range> skipped_ranges;
+  // Used by |$ccls/reload|.
+  V<String> dependencies;
+  // modification time of the file recorded
+  int64_t mtime = 0;
+};
+
+struct DBIndexInclude : IndexIncludeBase<db::string> {
+  template <typename Alloc>
+  DBIndexInclude(const Alloc &alloc)
+      : DBIndexInclude(std::allocator_arg, alloc) {}
+  template <typename Alloc>
+  DBIndexInclude(std::allocator_arg_t, const Alloc &alloc)
+      : IndexIncludeBase{{}, decltype(resolved_path)(alloc)} {}
+
+  template <typename Alloc>
+  DBIndexInclude(const DBIndexInclude &rhs, const Alloc &alloc)
+      : DBIndexInclude(std::allocator_arg, alloc, rhs) {}
+  template <typename Alloc>
+  DBIndexInclude(std::allocator_arg_t, const Alloc &alloc,
+                 const DBIndexInclude &rhs)
+      : IndexIncludeBase{rhs.line,
+                         decltype(resolved_path)(rhs.resolved_path, alloc)} {}
+
+  template <typename Alloc>
+  DBIndexInclude(DBIndexInclude &&rhs, const Alloc &alloc)
+      : DBIndexInclude(std::allocator_arg, alloc, std::move(rhs)) {}
+  template <typename Alloc>
+  DBIndexInclude(std::allocator_arg_t, const Alloc &alloc, DBIndexInclude &&rhs)
+      : IndexIncludeBase{rhs.line, decltype(resolved_path)(
+                                       std::move(rhs.resolved_path), alloc)} {}
+};
+
+struct DBFileDef : FileDef<db::string, DBIndexInclude, db::scoped_vector> {
+  template <typename Alloc>
+  DBFileDef(const Alloc &alloc) : DBFileDef(std::allocator_arg, alloc) {}
+  template <typename Alloc>
+  DBFileDef(std::allocator_arg_t, const Alloc &alloc)
+      : FileDef{decltype(path)(alloc),
+                decltype(args)(alloc),
+                {},
+                decltype(includes)(alloc),
+                decltype(skipped_ranges)(alloc),
+                decltype(dependencies)(alloc)} {}
+
+  template <typename Alloc>
+  DBFileDef(const DBFileDef &rhs, const Alloc &alloc)
+      : DBFileDef(std::allocator_arg, alloc, rhs) {}
+  template <typename Alloc>
+  DBFileDef(std::allocator_arg_t, const Alloc &alloc, const DBFileDef &rhs)
+      : FileDef{decltype(path)(rhs.path, alloc),
+                decltype(args)(rhs.args, alloc),
+                decltype(language)(rhs.language),
+                decltype(includes)(rhs.includes, alloc),
+                decltype(skipped_ranges)(rhs.skipped_ranges, alloc),
+                decltype(dependencies)(rhs.dependencies, alloc)} {}
+
+  template <typename Alloc>
+  DBFileDef(DBFileDef &&rhs, const Alloc &alloc)
+      : DBFileDef(std::allocator_arg, alloc, std::move(rhs)) {}
+  template <typename Alloc>
+  DBFileDef(std::allocator_arg_t, const Alloc &alloc, DBFileDef &&rhs)
+      : FileDef{decltype(path)(std::move(rhs.path), alloc),
+                decltype(args)(std::move(rhs.args), alloc),
+                decltype(language)(rhs.language),
+                decltype(includes)(std::move(rhs.includes), alloc),
+                decltype(skipped_ranges)(std::move(rhs.skipped_ranges), alloc),
+                decltype(dependencies)(std::move(rhs.dependencies), alloc)} {}
+};
+
+struct QueryFile {
+  using Def = DBFileDef;
+  using CoreDef = FileDef<std::string, IndexInclude, std::vector>;
+  using DefUpdate = std::pair<CoreDef, std::string>;
 
   int id = -1;
   std::optional<Def> def;
   // `extent` is valid => declaration; invalid => regular reference
-  llvm::DenseMap<ExtentRef, int> symbol2refcnt;
+  db::scoped_unordered_map<ExtentRef, int> symbol2refcnt;
+
+  template <typename Alloc>
+  QueryFile(std::allocator_arg_t, const Alloc &alloc, const QueryFile &rhs)
+      : def(rhs.def), symbol2refcnt(rhs.symbol2refcnt, alloc) {}
+  template <typename Alloc>
+  QueryFile(const Alloc &alloc) : QueryFile(std::allocator_arg, alloc) {}
+
+  template <typename Alloc>
+  QueryFile(std::allocator_arg_t, const Alloc &alloc) : symbol2refcnt(alloc) {}
 };
 
 template <typename Q, typename QDef> struct QueryEntity {
@@ -66,28 +193,285 @@ template <typename T>
 using Update =
     std::unordered_map<Usr, std::pair<std::vector<T>, std::vector<T>>>;
 
-struct QueryFunc : QueryEntity<QueryFunc, FuncDef<Vec>> {
+struct DBFuncDef : FuncDef<db::scoped_vector, db::string> {
+  template <typename Alloc>
+  DBFuncDef(const Alloc &alloc) : DBFuncDef(std::allocator_arg, alloc) {}
+  template <typename Alloc>
+  DBFuncDef(std::allocator_arg_t, const Alloc &alloc)
+      : FuncDef{{},
+                decltype(detailed_name)(alloc),
+                decltype(hover)(alloc),
+                decltype(comments)(alloc),
+                {},
+                decltype(bases)(alloc),
+                decltype(vars)(alloc),
+                decltype(callees)(alloc)} {}
+
+  template <typename Alloc>
+  DBFuncDef(const DBFuncDef &rhs, const Alloc &alloc)
+      : DBFuncDef(std::allocator_arg, alloc, rhs) {}
+  template <typename Alloc>
+  DBFuncDef(std::allocator_arg_t, const Alloc &alloc, const DBFuncDef &rhs)
+      : FuncDef{{},
+                decltype(detailed_name)(rhs.detailed_name, alloc),
+                decltype(hover)(rhs.hover, alloc),
+                decltype(comments)(rhs.comments, alloc),
+                {},
+                decltype(bases)(rhs.bases, alloc),
+                decltype(vars)(rhs.vars, alloc),
+                decltype(callees)(rhs.callees, alloc)} {
+    spell = rhs.spell;
+    file_id = rhs.file_id;
+    qual_name_offset = rhs.qual_name_offset;
+    short_name_offset = rhs.short_name_offset;
+    short_name_size = rhs.short_name_size;
+    kind = rhs.kind;
+    parent_kind = rhs.parent_kind;
+    storage = rhs.storage;
+  }
+
+  template <typename Alloc>
+  DBFuncDef(DBFuncDef &&rhs, const Alloc &alloc)
+      : DBFuncDef(std::allocator_arg, alloc, std::move(rhs)) {}
+  template <typename Alloc>
+  DBFuncDef(std::allocator_arg_t, const Alloc &alloc, DBFuncDef &&rhs)
+      : FuncDef{{},
+                decltype(detailed_name)(std::move(rhs.detailed_name), alloc),
+                decltype(hover)(std::move(rhs.hover), alloc),
+                decltype(comments)(std::move(rhs.comments), alloc),
+                decltype(spell)(std::move(rhs.spell)),
+                decltype(bases)(std::move(rhs.bases), alloc),
+                decltype(vars)(std::move(rhs.vars), alloc),
+                decltype(callees)(std::move(rhs.callees), alloc)} {
+    file_id = rhs.file_id;
+    qual_name_offset = rhs.qual_name_offset;
+    short_name_offset = rhs.short_name_offset;
+    short_name_size = rhs.short_name_size;
+    kind = rhs.kind;
+    parent_kind = rhs.parent_kind;
+    storage = rhs.storage;
+  }
+};
+struct QueryFunc : QueryEntity<QueryFunc, DBFuncDef> {
   Usr usr;
-  llvm::SmallVector<Def, 1> def;
-  std::vector<DeclRef> declarations;
-  std::vector<Usr> derived;
-  std::vector<Use> uses;
+  db::scoped_vector<Def> def;
+  db::scoped_vector<DeclRef> declarations;
+  db::scoped_vector<Usr> derived;
+  db::scoped_vector<Use> uses;
+
+  template <typename Alloc>
+  QueryFunc(std::allocator_arg_t, const Alloc &alloc)
+      : def(alloc), declarations(alloc), derived(alloc), uses(alloc) {}
+  template <typename Alloc>
+  QueryFunc(const Alloc &alloc) : QueryFunc(std::allocator_arg, alloc) {}
+
+  template <typename Alloc>
+  QueryFunc(const QueryFunc &rhs, const Alloc &alloc)
+      : QueryFunc(std::allocator_arg, alloc, rhs) {}
+  template <typename Alloc>
+  QueryFunc(std::allocator_arg_t, const Alloc &alloc, const QueryFunc &rhs)
+      : def(rhs.def, alloc), declarations(rhs.declarations, alloc),
+        derived(rhs.derived, alloc), uses(rhs.uses, alloc) {
+    usr = rhs.usr;
+  }
+
+  template <typename Alloc>
+  QueryFunc(QueryFunc &&rhs, const Alloc &alloc)
+      : QueryFunc(std::allocator_arg, alloc, std::move(rhs)) {}
+  template <typename Alloc>
+  QueryFunc(std::allocator_arg_t, const Alloc &alloc, QueryFunc &&rhs)
+      : def(std::move(rhs.def), alloc),
+        declarations(std::move(rhs.declarations), alloc),
+        derived(std::move(rhs.derived), alloc),
+        uses(std::move(rhs.uses), alloc) {
+    usr = rhs.usr;
+  }
 };
 
-struct QueryType : QueryEntity<QueryType, TypeDef<Vec>> {
+struct DBTypeDef : TypeDef<db::scoped_vector, db::string> {
+  template <typename Alloc>
+  DBTypeDef(const Alloc &alloc) : DBTypeDef(std::allocator_arg, alloc) {}
+  template <typename Alloc>
+  DBTypeDef(std::allocator_arg_t, const Alloc &alloc)
+      : TypeDef{{},
+                decltype(detailed_name)(alloc),
+                decltype(hover)(alloc),
+                decltype(comments)(alloc),
+                {},
+                decltype(bases)(alloc),
+                decltype(funcs)(alloc),
+                decltype(types)(alloc),
+                decltype(vars)(alloc)} {}
+
+  template <typename Alloc>
+  DBTypeDef(const DBTypeDef &rhs, const Alloc &alloc)
+      : DBTypeDef(std::allocator_arg, alloc, rhs) {}
+  template <typename Alloc>
+  DBTypeDef(std::allocator_arg_t, const Alloc &alloc, const DBTypeDef &rhs)
+      : TypeDef{{},
+                decltype(detailed_name)(rhs.detailed_name, alloc),
+                decltype(hover)(rhs.hover, alloc),
+                decltype(comments)(rhs.comments, alloc),
+                decltype(spell)(rhs.spell),
+                decltype(bases)(rhs.bases, alloc),
+                decltype(funcs)(rhs.funcs, alloc),
+                decltype(types)(rhs.types, alloc),
+                decltype(vars)(rhs.vars, alloc)} {
+    alias_of = rhs.alias_of;
+    file_id = rhs.file_id;
+    qual_name_offset = rhs.qual_name_offset;
+    short_name_offset = rhs.short_name_offset;
+    short_name_size = rhs.short_name_size;
+    kind = rhs.kind;
+    parent_kind = rhs.parent_kind;
+  }
+
+  template <typename Alloc>
+  DBTypeDef(DBTypeDef &&rhs, const Alloc &alloc)
+      : DBTypeDef(std::allocator_arg, alloc, std::move(rhs)) {}
+  template <typename Alloc>
+  DBTypeDef(std::allocator_arg_t, const Alloc &alloc, DBTypeDef &&rhs)
+      : TypeDef{{},
+                decltype(detailed_name)(std::move(rhs.detailed_name), alloc),
+                decltype(hover)(std::move(rhs.hover), alloc),
+                decltype(comments)(std::move(rhs.comments), alloc),
+                decltype(spell)(std::move(rhs.spell)),
+                decltype(bases)(std::move(rhs.bases), alloc),
+                decltype(funcs)(std::move(rhs.funcs), alloc),
+                decltype(types)(std::move(rhs.types), alloc),
+                decltype(vars)(std::move(rhs.vars), alloc)} {
+    alias_of = rhs.alias_of;
+    file_id = rhs.file_id;
+    qual_name_offset = rhs.qual_name_offset;
+    short_name_offset = rhs.short_name_offset;
+    short_name_size = rhs.short_name_size;
+    kind = rhs.kind;
+    parent_kind = rhs.parent_kind;
+  }
+};
+struct QueryType : QueryEntity<QueryType, DBTypeDef> {
   Usr usr;
-  llvm::SmallVector<Def, 1> def;
-  std::vector<DeclRef> declarations;
-  std::vector<Usr> derived;
-  std::vector<Usr> instances;
-  std::vector<Use> uses;
+  db::scoped_vector<Def> def;
+  db::scoped_vector<DeclRef> declarations;
+  db::scoped_vector<Usr> derived;
+  db::scoped_vector<Usr> instances;
+  db::scoped_vector<Use> uses;
+
+  template <typename Alloc>
+  QueryType(std::allocator_arg_t, const Alloc &alloc)
+      : def(alloc), declarations(alloc), derived(alloc), instances(alloc),
+        uses(alloc) {}
+  template <typename Alloc>
+  QueryType(const Alloc &alloc) : QueryType(std::allocator_arg, alloc) {}
+
+  template <typename Alloc>
+  QueryType(const QueryType &rhs, const Alloc &alloc)
+      : QueryType(std::allocator_arg, alloc, std::move(rhs)) {}
+  template <typename Alloc>
+  QueryType(std::allocator_arg_t, const Alloc &alloc, const QueryType &rhs)
+      : def(rhs.def, alloc), declarations(rhs.declarations, alloc),
+        derived(rhs.derived, alloc), instances(rhs.instances, alloc),
+        uses(rhs.uses, alloc) {
+    usr = rhs.usr;
+  }
+
+  template <typename Alloc>
+  QueryType(QueryType &&rhs, const Alloc &alloc)
+      : QueryType(std::allocator_arg, alloc, std::move(rhs)) {}
+  template <typename Alloc>
+  QueryType(std::allocator_arg_t, const Alloc &alloc, QueryType &&rhs)
+      : def(std::move(rhs.def), alloc),
+        declarations(std::move(rhs.declarations), alloc),
+        derived(std::move(rhs.derived), alloc),
+        instances(std::move(rhs.instances), alloc),
+        uses(std::move(rhs.uses), alloc) {
+    usr = rhs.usr;
+  }
 };
 
-struct QueryVar : QueryEntity<QueryVar, VarDef> {
+struct DBVarDef : VarDef<db::string> {
+  template <typename Alloc>
+  DBVarDef(const Alloc &alloc) : DBVarDef(std::allocator_arg, alloc) {}
+  template <typename Alloc>
+  DBVarDef(std::allocator_arg_t, const Alloc &alloc)
+      : VarDef{{},
+               decltype(detailed_name)(alloc),
+               decltype(hover)(alloc),
+               decltype(comments)(alloc)} {}
+
+  template <typename Alloc>
+  DBVarDef(const DBVarDef &rhs, const Alloc &alloc)
+      : DBVarDef(std::allocator_arg, alloc, rhs) {}
+  template <typename Alloc>
+  DBVarDef(std::allocator_arg_t, const Alloc &alloc, const DBVarDef &rhs)
+      : VarDef{{},
+               decltype(detailed_name)(rhs.detailed_name, alloc),
+               decltype(hover)(rhs.hover, alloc),
+               decltype(comments)(rhs.comments, alloc),
+               decltype(spell)(rhs.spell)} {
+    type = rhs.type;
+    file_id = rhs.file_id;
+    qual_name_offset = rhs.qual_name_offset;
+    short_name_offset = rhs.short_name_offset;
+    short_name_size = rhs.short_name_size;
+    kind = rhs.kind;
+    parent_kind = rhs.parent_kind;
+    storage = rhs.storage;
+  }
+
+  template <typename Alloc>
+  DBVarDef(DBVarDef &&rhs, const Alloc &alloc)
+      : DBVarDef(std::allocator_arg, alloc, std::move(rhs)) {}
+  template <typename Alloc>
+  DBVarDef(std::allocator_arg_t, const Alloc &alloc, DBVarDef &&rhs)
+      : VarDef{{},
+               decltype(detailed_name)(std::move(rhs.detailed_name), alloc),
+               decltype(hover)(std::move(rhs.hover), alloc),
+               decltype(comments)(std::move(rhs.comments), alloc),
+               decltype(spell)(std::move(rhs.spell))} {
+    type = rhs.type;
+    file_id = rhs.file_id;
+    qual_name_offset = rhs.qual_name_offset;
+    short_name_offset = rhs.short_name_offset;
+    short_name_size = rhs.short_name_size;
+    kind = rhs.kind;
+    parent_kind = rhs.parent_kind;
+    storage = rhs.storage;
+  }
+};
+struct QueryVar : QueryEntity<QueryVar, DBVarDef> {
   Usr usr;
-  llvm::SmallVector<Def, 1> def;
-  std::vector<DeclRef> declarations;
-  std::vector<Use> uses;
+  db::scoped_vector<Def> def;
+  db::scoped_vector<DeclRef> declarations;
+  db::scoped_vector<Use> uses;
+
+  // QueryVar() : def(), declarations(), uses() {}
+  template <typename Alloc>
+  QueryVar(const Alloc &alloc) : QueryVar(std::allocator_arg, alloc) {}
+  template <typename Alloc>
+  QueryVar(std::allocator_arg_t, const Alloc &alloc)
+      : def(alloc), declarations(alloc), uses(alloc) {}
+
+  template <typename Alloc>
+  QueryVar(const QueryVar &rhs, const Alloc &alloc)
+      : QueryVar(std::allocator_arg, alloc, rhs) {}
+  template <typename Alloc>
+  QueryVar(std::allocator_arg_t, const Alloc &alloc, const QueryVar &rhs)
+      : def(rhs.def, alloc), declarations(rhs.declarations, alloc),
+        uses(rhs.uses, alloc) {
+    usr = rhs.usr;
+  }
+
+  template <typename Alloc>
+  QueryVar(QueryVar &&rhs, const Alloc &alloc)
+      : QueryVar(std::allocator_arg, alloc, std::move(rhs)) {}
+  template <typename Alloc>
+  QueryVar(std::allocator_arg_t, const Alloc &alloc, QueryVar &&rhs)
+      : def(std::move(rhs.def), alloc),
+        declarations(std::move(rhs.declarations), alloc),
+        uses(std::move(rhs.uses), alloc) {
+    usr = rhs.usr;
+  }
 };
 
 struct IndexUpdate {
@@ -144,14 +528,22 @@ using Lid2file_id = std::unordered_map<int, int>;
 // The query database is heavily optimized for fast queries. It is stored
 // in-memory.
 struct DB {
-  std::vector<QueryFile> files;
-  llvm::StringMap<int> name2file_id;
-  llvm::DenseMap<Usr, int, DenseMapInfoForUsr> func_usr, type_usr, var_usr;
-  llvm::SmallVector<QueryFunc, 0> funcs;
-  llvm::SmallVector<QueryType, 0> types;
-  llvm::SmallVector<QueryVar, 0> vars;
+  db::scoped_map<int, QueryFile> files;
+  db::scoped_unordered_map<db::string, int> name2file_id;
+  db::scoped_map<Usr, std::size_t> func_usr, type_usr, var_usr;
+  db::scoped_map<std::size_t, QueryFunc> funcs;
+  db::scoped_map<std::size_t, QueryType> types;
+  db::scoped_map<std::size_t, QueryVar> vars;
+  db::allocator<DB> allocator;
 
+  DB(const db::allocator<DB> &alloc) : DB(std::allocator_arg, alloc) {}
+  DB(std::allocator_arg_t, const db::allocator<DB> &alloc)
+      : files(alloc), name2file_id(alloc), func_usr(alloc), type_usr(alloc),
+        var_usr(alloc), funcs(alloc), types(alloc), vars(alloc),
+        allocator(alloc) {}
   void clear();
+
+  void populateVFS(VFS *vfs) const;
 
   template <typename Def>
   void removeUsrs(Kind kind, int file_id,
@@ -187,14 +579,14 @@ Maybe<DeclRef> getDefinitionSpell(DB *db, SymbolIdx sym);
 
 // Get defining declaration (if exists) or an arbitrary declaration (otherwise)
 // for each id.
-std::vector<Use> getFuncDeclarations(DB *, const std::vector<Usr> &);
+std::vector<Use> getFuncDeclarations(DB *, const db::scoped_vector<Usr> &);
 std::vector<Use> getFuncDeclarations(DB *, const Vec<Usr> &);
-std::vector<Use> getTypeDeclarations(DB *, const std::vector<Usr> &);
-std::vector<DeclRef> getVarDeclarations(DB *, const std::vector<Usr> &,
+std::vector<Use> getTypeDeclarations(DB *, const db::scoped_vector<Usr> &);
+std::vector<DeclRef> getVarDeclarations(DB *, const db::scoped_vector<Usr> &,
                                         unsigned);
 
 // Get non-defining declarations.
-std::vector<DeclRef> &getNonDefDeclarations(DB *db, SymbolIdx sym);
+std::vector<DeclRef> getNonDefDeclarations(DB *db, SymbolIdx sym);
 
 std::vector<Use> getUsesForAllBases(DB *db, QueryFunc &root);
 std::vector<Use> getUsesForAllDerived(DB *db, QueryFunc &root);
@@ -267,3 +659,28 @@ void eachDefinedFunc(DB *db, const C &usrs, Fn &&fn) {
   }
 }
 } // namespace ccls
+
+namespace std {
+template <typename Alloc>
+struct uses_allocator<ccls::DBIndexInclude, Alloc> : std::true_type {};
+template <typename Alloc>
+struct uses_allocator<ccls::DBFileDef, Alloc> : std::true_type {};
+template <typename Alloc>
+struct uses_allocator<ccls::DBFuncDef, Alloc> : std::true_type {};
+template <typename Alloc>
+struct uses_allocator<ccls::DBTypeDef, Alloc> : std::true_type {};
+template <typename Alloc>
+struct uses_allocator<ccls::DBVarDef, Alloc> : std::true_type {};
+
+template <typename Alloc>
+struct uses_allocator<ccls::QueryFile, Alloc> : std::true_type {};
+template <typename Alloc>
+struct uses_allocator<ccls::QueryFunc, Alloc> : std::true_type {};
+template <typename Alloc>
+struct uses_allocator<ccls::QueryType, Alloc> : std::true_type {};
+template <typename Alloc>
+struct uses_allocator<ccls::QueryVar, Alloc> : std::true_type {};
+
+template <typename Alloc>
+struct uses_allocator<ccls::DB, Alloc> : std::true_type {};
+} // namespace std

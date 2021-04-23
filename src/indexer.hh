@@ -17,6 +17,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include <array>
 
 namespace std {
 template <> struct hash<clang::FileID> {
@@ -133,21 +134,21 @@ template <typename D> struct NameMixin {
   std::string_view name(bool qualified) const {
     auto self = static_cast<const D *>(this);
     return qualified
-               ? std::string_view(self->detailed_name + self->qual_name_offset,
-                                  self->short_name_offset -
-                                      self->qual_name_offset +
-                                      self->short_name_size)
-               : std::string_view(self->detailed_name + self->short_name_offset,
-                                  self->short_name_size);
+               ? std::string_view(self->detailed_name)
+                     .substr(self->qual_name_offset,
+                             self->short_name_offset - self->qual_name_offset +
+                                 self->short_name_size)
+               : std::string_view(self->detailed_name)
+                     .substr(self->short_name_offset, self->short_name_size);
   }
 };
 
-template <template <typename T> class V>
-struct FuncDef : NameMixin<FuncDef<V>> {
+template <template <typename T> class V, typename String = const char *>
+struct FuncDef : NameMixin<FuncDef<V, String>> {
   // General metadata.
-  const char *detailed_name = "";
-  const char *hover = "";
-  const char *comments = "";
+  String detailed_name = "";
+  String hover = "";
+  String comments = "";
   Maybe<DeclRef> spell;
 
   // Method this method overrides.
@@ -165,8 +166,12 @@ struct FuncDef : NameMixin<FuncDef<V>> {
   SymbolKind parent_kind = SymbolKind::Unknown;
   uint8_t storage = clang::SC_None;
 
-  const Usr *bases_begin() const { return bases.begin(); }
-  const Usr *bases_end() const { return bases.end(); }
+  typename decltype(bases)::const_iterator bases_begin() const {
+    return bases.begin();
+  }
+  typename decltype(bases)::const_iterator bases_end() const {
+    return bases.end();
+  }
 };
 REFLECT_STRUCT(FuncDef<VectorAdapter>, detailed_name, hover, comments, spell,
                bases, vars, callees, qual_name_offset, short_name_offset,
@@ -181,11 +186,11 @@ struct IndexFunc : NameMixin<IndexFunc> {
   std::vector<Use> uses;
 };
 
-template <template <typename T> class V>
-struct TypeDef : NameMixin<TypeDef<V>> {
-  const char *detailed_name = "";
-  const char *hover = "";
-  const char *comments = "";
+template <template <typename T> class V, typename String = const char *>
+struct TypeDef : NameMixin<TypeDef<V, String>> {
+  String detailed_name = "";
+  String hover = "";
+  String comments = "";
   Maybe<DeclRef> spell;
 
   V<Usr> bases;
@@ -204,8 +209,12 @@ struct TypeDef : NameMixin<TypeDef<V>> {
   SymbolKind kind = SymbolKind::Unknown;
   SymbolKind parent_kind = SymbolKind::Unknown;
 
-  const Usr *bases_begin() const { return bases.begin(); }
-  const Usr *bases_end() const { return bases.end(); }
+  typename decltype(bases)::const_iterator bases_begin() const {
+    return bases.begin();
+  }
+  typename decltype(bases)::const_iterator bases_end() const {
+    return bases.end();
+  }
 };
 REFLECT_STRUCT(TypeDef<VectorAdapter>, detailed_name, hover, comments, spell,
                bases, funcs, types, vars, alias_of, qual_name_offset,
@@ -221,13 +230,15 @@ struct IndexType {
   std::vector<Use> uses;
 };
 
-struct VarDef : NameMixin<VarDef> {
+template <typename String = const char *>
+struct VarDef : NameMixin<VarDef<String>> {
   // General metadata.
-  const char *detailed_name = "";
-  const char *hover = "";
-  const char *comments = "";
+  String detailed_name = "";
+  String hover = "";
+  String comments = "";
   Maybe<DeclRef> spell;
 
+  std::array<Usr, 0> bases;
   // Type of the variable.
   Usr type = 0;
   int file_id = -1; // not serialized
@@ -250,28 +261,33 @@ struct VarDef : NameMixin<VarDef> {
             storage == clang::SC_Register);
   }
 
-  const Usr *bases_begin() const { return nullptr; }
-  const Usr *bases_end() const { return nullptr; }
+  typename decltype(bases)::const_iterator bases_begin() const {
+    return bases.begin();
+  }
+  typename decltype(bases)::const_iterator bases_end() const {
+    return bases.end();
+  }
 };
-REFLECT_STRUCT(VarDef, detailed_name, hover, comments, spell, type,
+REFLECT_STRUCT(VarDef<>, detailed_name, hover, comments, spell, type,
                qual_name_offset, short_name_offset, short_name_size, kind,
                parent_kind, storage);
 
 struct IndexVar {
-  using Def = VarDef;
+  using Def = VarDef<>;
   Usr usr;
   Def def;
   std::vector<DeclRef> declarations;
   std::vector<Use> uses;
 };
 
-struct IndexInclude {
+template <typename String> struct IndexIncludeBase {
   // Line that has the include directive. We don't have complete range
   // information - a line is good enough for clicking.
   int line = 0;
   // Absolute path to the index.
-  const char *resolved_path;
+  String resolved_path;
 };
+using IndexInclude = IndexIncludeBase<const char *>;
 
 struct IndexFile {
   // For both JSON and MessagePack cache files.

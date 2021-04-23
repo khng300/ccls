@@ -127,6 +127,10 @@ if(LLVM_ENABLE_ZLIB)
   find_package(ZLIB)
 endif()
 
+# Enable boost::interprocess
+find_package(Boost REQUIRED)
+target_link_libraries(ccls PRIVATE Boost::boost)
+
 ### Definitions
 
 # Find Clang resource directory with Clang executable.
@@ -209,6 +213,7 @@ target_sources(ccls PRIVATE
   src/pipeline.cc
   src/platform_posix.cc
   src/platform_win.cc
+  src/db_allocator.cc
   src/position.cc
   src/project.cc
   src/query.cc

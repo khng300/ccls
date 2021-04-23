@@ -124,7 +124,7 @@ bool addSymbol(
       }
   });
   if (!dr) {
-    auto &decls = getNonDefDeclarations(db, sym);
+    auto decls = getNonDefDeclarations(db, sym);
     for (auto &dr1 : decls) {
       dr = dr1;
       if (!in_folder && (in_folder = file_set[dr1.file_id]))
@@ -171,13 +171,13 @@ void MessageHandler::workspace_symbol(WorkspaceSymbolParam &param,
                      &cands) &&
            cands.size() >= g_config->workspaceSymbol.maxNum;
   };
-  for (auto &func : db->funcs)
+  for (auto &[_, func] : db->funcs)
     if (add({func.usr, Kind::Func}))
       goto done_add;
-  for (auto &type : db->types)
+  for (auto &[_, type] : db->types)
     if (add({type.usr, Kind::Type}))
       goto done_add;
-  for (auto &var : db->vars)
+  for (auto &[_, var] : db->vars)
     if (var.def.size() && !var.def[0].is_local() && add({var.usr, Kind::Var}))
       goto done_add;
 done_add:

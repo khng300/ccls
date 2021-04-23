@@ -72,8 +72,8 @@ void doField(MessageHandler *m, Out_cclsMember *entry, const QueryVar &var,
   if (qualified)
     entry1.fieldName += def1->detailed_name;
   else {
-    entry1.fieldName +=
-        std::string_view(def1->detailed_name).substr(0, def1->qual_name_offset);
+    entry1.fieldName += std::string_view(def1->detailed_name)
+                            .substr(0, def1->qual_name_offset);
     entry1.fieldName += def1->name(false);
   }
   if (def1->spell) {

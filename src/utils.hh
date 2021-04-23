@@ -130,6 +130,9 @@ public:
 };
 
 template <typename T> struct Vec {
+  using iterator = T*;
+  using const_iterator = const T*;
+
   std::unique_ptr<T[]> a;
   int s = 0;
 #if !(__clang__ || __GNUC__ > 7 || __GNUC__ == 7 && __GNUC_MINOR__ >= 4) ||    \

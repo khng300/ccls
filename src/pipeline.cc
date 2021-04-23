@@ -494,10 +494,11 @@ void main_OnIndexed(DB *db, WorkingFiles *wfiles, IndexUpdate *update) {
         << "loaded project. Refresh semantic highlight for all working file.";
     std::lock_guard lock(wfiles->mutex);
     for (auto &[f, wf] : wfiles->files) {
-      std::string path = lowerPathIfInsensitive(f);
-      if (db->name2file_id.find(path) == db->name2file_id.end())
+      auto it = db->name2file_id.find(
+          db::toInMemScopedString(lowerPathIfInsensitive(f)));
+      if (it == db->name2file_id.end())
         continue;
-      QueryFile &file = db->files[db->name2file_id[path]];
+      QueryFile &file = db->files[it->second];
       emitSemanticHighlight(db, wf.get(), file);
     }
     return;
@@ -621,6 +622,7 @@ void mainLoop() {
   Project project;
   WorkingFiles wfiles;
   VFS vfs;
+  auto inmem_allocator = db::getAlloc();
 
   SemaManager manager(
       &project, &wfiles,
@@ -640,11 +642,11 @@ void mainLoop() {
       });
 
   IncludeComplete include_complete(&project);
-  DB db;
+  DB in_memory_db(inmem_allocator);
 
   // Setup shared references.
   MessageHandler handler;
-  handler.db = &db;
+  handler.db = &in_memory_db;
   handler.project = &project;
   handler.vfs = &vfs;
   handler.wfiles = &wfiles;
@@ -690,7 +692,7 @@ void mainLoop() {
         break;
       did_work = true;
       indexed = true;
-      main_OnIndexed(&db, &wfiles, &*update);
+      main_OnIndexed(handler.db, &wfiles, &*update);
       if (update->files_def_update) {
         auto it = path2backlog.find(update->files_def_update->first.path);
         if (it != path2backlog.end()) {

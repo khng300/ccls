@@ -238,6 +238,7 @@ struct ReplyOnce {
 
 struct MessageHandler {
   SemaManager *manager = nullptr;
+  db::impl::managed_mapped_file map_file;
   DB *db = nullptr;
   IncludeComplete *include_complete = nullptr;
   Project *project = nullptr;
