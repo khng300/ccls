@@ -8,7 +8,7 @@
 
 namespace ccls {
 REFLECT_STRUCT(IndexInclude, line, resolved_path);
-REFLECT_STRUCT(QueryFile::Def, path, args, language, dependencies, includes,
+REFLECT_STRUCT(QueryFile::CoreDef, path, args, language, dependencies, includes,
                skipped_ranges);
 
 namespace {
@@ -59,17 +59,41 @@ void MessageHandler::ccls_fileInfo(JsonReader &reader, ReplyOnce &reply) {
   if (!file)
     return;
 
-  QueryFile::Def result;
+  QueryFile::CoreDef result;
+  const QueryFile::Def &o = *file->def;
   // Expose some fields of |QueryFile::Def|.
-  result.path = file->def->path;
-  result.args = file->def->args;
-  result.language = file->def->language;
-  if (param.dependencies)
-    result.dependencies = file->def->dependencies;
+  result.path = db::toStdString(o.path);
+  std::for_each(o.args.begin(), o.args.end(), [&result](const auto &m) {
+    result.args.emplace_back(m.data());
+  });
+  result.language = o.language;
   if (param.includes)
-    result.includes = file->def->includes;
+    for (const auto &m : o.includes) {
+                  [&result](const QueryFile::Def::IndexInclude &m) {
+                    QueryFile::CoreDef::IndexInclude def;
+                    def.line = m.line;
+                    def.resolved_path = m.resolved_path.data();
+                    result.includes.emplace_back(def);
+                  }(m);
+    }
+    /*
+    std::for_each(o.includes.begin(), o.includes.end(),
+                  [&result](const QueryFile::Def::IndexInclude &m) {
+                    QueryFile::CoreDef::IndexInclude def;
+                    def.line = m.line;
+                    def.resolved_path = m.resolved_path.data();
+                    result.includes.emplace_back(def);
+                  });
+  */
   if (param.skipped_ranges)
-    result.skipped_ranges = file->def->skipped_ranges;
+    std::for_each(
+        o.skipped_ranges.begin(), o.skipped_ranges.end(),
+        [&result](const auto &m) { result.skipped_ranges.emplace_back(m); });
+  if (param.dependencies)
+    std::for_each(o.dependencies.begin(), o.dependencies.end(),
+                  [&result](const auto &m) {
+                    result.dependencies.emplace_back(m.data());
+                  });
   reply(result);
 }
 } // namespace ccls

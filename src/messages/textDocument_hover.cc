@@ -49,13 +49,13 @@ getHover(DB *db, LanguageId lang, SymbolRef sym, int file_id) {
   withEntity(db, sym, [&](const auto &entity) {
     for (auto &d : entity.def) {
       if (!comments && d.comments[0])
-        comments = d.comments;
+        comments = &d.comments[0];
       if (d.spell) {
         if (d.comments[0])
-          comments = d.comments;
+          comments = &d.comments[0];
         if (const char *s =
-                d.hover[0] ? d.hover
-                           : d.detailed_name[0] ? d.detailed_name : nullptr) {
+                d.hover[0] ? &d.hover[0]
+                           : d.detailed_name[0] ? &d.detailed_name[0] : nullptr) {
           if (!hover)
             hover = {languageIdentifier(lang), s};
           else if (strlen(s) > hover->value.size())
@@ -89,7 +89,7 @@ void MessageHandler::textDocument_hover(TextDocumentPositionParam &param,
   Hover result;
   for (SymbolRef sym : findSymbolsAtLocation(wf, file, param.position)) {
     std::optional<lsRange> ls_range =
-        getLsRange(wfiles->getFile(file->def->path), sym.range);
+        getLsRange(wfiles->getFile(db::toStdString(file->def->path)), sym.range);
     if (!ls_range)
       continue;
 

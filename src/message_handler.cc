@@ -235,7 +235,8 @@ void MessageHandler::run(InMessage &msg) {
 
 QueryFile *MessageHandler::findFile(const std::string &path, int *out_file_id) {
   QueryFile *ret = nullptr;
-  auto it = db->name2file_id.find(lowerPathIfInsensitive(path));
+  auto it = db->name2file_id.find(
+      db::toInMemScopedString(lowerPathIfInsensitive(path)));
   if (it != db->name2file_id.end()) {
     QueryFile &file = db->files[it->second];
     if (file.def) {
@@ -282,19 +283,20 @@ void emitSemanticHighlight(DB *db, WorkingFile *wfile, QueryFile &file) {
                           g_config->highlight.blacklist);
   assert(file.def);
   if (wfile->buffer_content.size() > g_config->highlight.largeFileSize ||
-      !match.matches(file.def->path))
+      !match.matches(db::toStdString(file.def->path)))
     return;
 
   // Group symbols together.
   std::unordered_map<SymbolIdx, CclsSemanticHighlightSymbol> grouped_symbols;
-  for (auto [sym, refcnt] : file.symbol2refcnt) {
+  for (auto [sym_, refcnt] : file.symbol2refcnt) {
+    std::remove_cv<decltype(sym_)>::type sym = sym_;
     if (refcnt <= 0)
       continue;
     std::string_view detailed_name;
     SymbolKind parent_kind = SymbolKind::Unknown;
     SymbolKind kind = SymbolKind::Unknown;
     uint8_t storage = SC_None;
-    int idx;
+    size_t idx;
     // This switch statement also filters out symbols that are not highlighted.
     switch (sym.kind) {
     case Kind::Func: {

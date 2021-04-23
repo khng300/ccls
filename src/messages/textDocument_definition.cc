@@ -78,10 +78,11 @@ void MessageHandler::textDocument_definition(TextDocumentPositionParam &param,
   if (result.empty()) {
     Maybe<Range> range;
     // Check #include
-    for (const IndexInclude &include : file->def->includes) {
+    for (const QueryFile::Def::IndexInclude &include : file->def->includes) {
       if (include.line == ls_pos.line) {
         result.push_back(
-            {DocumentUri::fromPath(include.resolved_path).raw_uri});
+            {DocumentUri::fromPath(db::toStdString(include.resolved_path))
+                 .raw_uri});
         range = {{0, 0}, {0, 0}};
         break;
       }
@@ -128,11 +129,11 @@ void MessageHandler::textDocument_definition(TextDocumentPositionParam &param,
           }
         }
       };
-      for (auto &func : db->funcs)
+      for (auto &[_, func] : db->funcs)
         fn({func.usr, Kind::Func});
-      for (auto &type : db->types)
+      for (auto &[_, type] : db->types)
         fn({type.usr, Kind::Type});
-      for (auto &var : db->vars)
+      for (auto &[_, var] : db->vars)
         if (var.def.size() && !var.def[0].is_local())
           fn({var.usr, Kind::Var});
 

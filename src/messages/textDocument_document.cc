@@ -82,14 +82,15 @@ void MessageHandler::textDocument_documentLink(TextDocumentParam &param,
 
   std::vector<DocumentLink> result;
   int column;
-  for (const IndexInclude &include : file->def->includes)
+  for (const QueryFile::Def::IndexInclude &include : file->def->includes)
     if (std::optional<int> bline =
             wf->getBufferPosFromIndexPos(include.line, &column, false)) {
       const std::string &line = wf->buffer_lines[*bline];
       auto start = line.find_first_of("\"<"), end = line.find_last_of("\">");
       if (start < end)
-        result.push_back({lsRange{{*bline, (int)start + 1}, {*bline, (int)end}},
-                          DocumentUri::fromPath(include.resolved_path)});
+        result.push_back(
+            {lsRange{{*bline, (int)start + 1}, {*bline, (int)end}},
+             DocumentUri::fromPath(db::toStdString(include.resolved_path))});
     }
   reply(result);
 } // namespace ccls
