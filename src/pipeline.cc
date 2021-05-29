@@ -49,23 +49,29 @@ REFLECT_STRUCT(WorkDoneProgressCreateParam, token);
 
 void VFS::clear() {
   std::lock_guard lock(mutex);
-  state.clear();
+  (*state).clear();
 }
 
 int VFS::loaded(const std::string &path) {
   std::lock_guard lock(mutex);
-  return state[path].loaded;
+  return stateAt(path).loaded;
 }
 
 bool VFS::stamp(const std::string &path, int64_t ts, int step) {
   std::lock_guard<std::mutex> lock(mutex);
-  State &st = state[path];
+  State &st = stateAt(path);
   if (st.timestamp < ts || (st.timestamp == ts && st.step < step)) {
     st.timestamp = ts;
     st.step = step;
     return true;
   } else
     return false;
+}
+
+VFS::State &VFS::stateAt(const std::string &path) {
+  StateMapType *s = state;
+  auto it = s->try_emplace(db::toInMemScopedString(path));
+  return it.first->second;
 }
 
 struct MessageHandler;
@@ -113,7 +119,7 @@ bool cacheInvalid(VFS *vfs, IndexFile *prev, const std::string &path,
                   const std::optional<std::string> &from) {
   {
     std::lock_guard<std::mutex> lock(vfs->mutex);
-    if (prev->mtime < vfs->state[path].timestamp) {
+    if (prev->mtime < vfs->stateAt(path).timestamp) {
       LOG_V(1) << "timestamp changed for " << path
                << (from ? " (via " + *from + ")" : std::string());
       return true;
@@ -255,9 +261,9 @@ bool indexer_Parse(SemaManager *completion, WorkingFiles *wfiles,
   if (g_config->index.onChange) {
     reparse = 2;
     std::lock_guard lock(vfs->mutex);
-    vfs->state[path_to_index].step = 0;
+    vfs->stateAt(path_to_index).step = 0;
     if (request.path != path_to_index)
-      vfs->state[request.path].step = 0;
+      vfs->stateAt(request.path).step = 0;
   }
   bool track = g_config->index.trackDependency > 1 ||
                (g_config->index.trackDependency == 1 && request.ts < loaded_ts);
@@ -302,7 +308,7 @@ bool indexer_Parse(SemaManager *completion, WorkingFiles *wfiles,
                            request.mode != IndexMode::Background);
       {
         std::lock_guard lock1(vfs->mutex);
-        VFS::State &st = vfs->state[path_to_index];
+        VFS::State &st = vfs->stateAt(path_to_index);
         st.loaded++;
         if (prev->no_linkage)
           st.step = 2;
@@ -319,7 +325,7 @@ bool indexer_Parse(SemaManager *completion, WorkingFiles *wfiles,
           continue;
         {
           std::lock_guard lock2(vfs->mutex);
-          VFS::State &st = vfs->state[path];
+          VFS::State &st = vfs->stateAt(path);
           if (st.loaded)
             continue;
           st.loaded++;
@@ -428,7 +434,7 @@ bool indexer_Parse(SemaManager *completion, WorkingFiles *wfiles,
                            request.mode != IndexMode::Background);
       {
         std::lock_guard lock1(vfs->mutex);
-        vfs->state[path].loaded++;
+        vfs->stateAt(path).loaded++;
       }
       if (entry.id >= 0) {
         std::lock_guard lock(project->mtx);
@@ -623,6 +629,8 @@ void mainLoop() {
   WorkingFiles wfiles;
   VFS vfs;
   auto inmem_allocator = db::getAlloc();
+  VFS::StateMapType vfs_state(inmem_allocator);
+  vfs.state = &vfs_state;
 
   SemaManager manager(
       &project, &wfiles,

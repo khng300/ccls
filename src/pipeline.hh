@@ -24,12 +24,14 @@ struct VFS {
     int step;
     int loaded;
   };
-  std::unordered_map<std::string, State> state;
+  using StateMapType = db::scoped_unordered_map<db::scoped_string, State>;
+  std::atomic<StateMapType *> state;
   std::mutex mutex;
 
   void clear();
   int loaded(const std::string &path);
   bool stamp(const std::string &path, int64_t ts, int step);
+  State &stateAt(const std::string &path);
 };
 
 enum class IndexMode {
