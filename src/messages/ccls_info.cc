@@ -31,10 +31,12 @@ REFLECT_STRUCT(Out_cclsInfo, db, pipeline, project);
 
 void MessageHandler::ccls_info(EmptyParam &, ReplyOnce &reply) {
   Out_cclsInfo result;
-  result.db.files = db->files.size();
-  result.db.funcs = db->funcs.size();
-  result.db.types = db->types.size();
-  result.db.vars = db->vars.size();
+  db->startRead([&]() {
+    result.db.files = db->files.size();
+    result.db.funcs = db->funcs.size();
+    result.db.types = db->types.size();
+    result.db.vars = db->vars.size();
+  });
   result.pipeline.lastIdle = pipeline::stats.last_idle;
   result.pipeline.completed = pipeline::stats.completed;
   result.pipeline.enqueued = pipeline::stats.enqueued;
@@ -53,29 +55,30 @@ REFLECT_STRUCT(FileInfoParam, textDocument, dependencies, includes,
                skipped_ranges);
 
 void MessageHandler::ccls_fileInfo(JsonReader &reader, ReplyOnce &reply) {
-  FileInfoParam param;
-  reflect(reader, param);
-  QueryFile *file = findFile(param.textDocument.uri.getPath());
-  if (!file)
-    return;
+  db->startWrite([&]() {
+    FileInfoParam param;
+    reflect(reader, param);
+    QueryFile *file = findFile(param.textDocument.uri.getPath());
+    if (!file)
+      return;
 
-  QueryFile::CoreDef result;
-  const QueryFile::Def &o = *file->def;
-  // Expose some fields of |QueryFile::Def|.
-  result.path = db::toStdString(o.path);
-  std::for_each(o.args.begin(), o.args.end(), [&result](const auto &m) {
-    result.args.emplace_back(m.data());
-  });
-  result.language = o.language;
-  if (param.includes)
-    for (const auto &m : o.includes) {
-                  [&result](const QueryFile::Def::IndexInclude &m) {
-                    QueryFile::CoreDef::IndexInclude def;
-                    def.line = m.line;
-                    def.resolved_path = m.resolved_path.data();
-                    result.includes.emplace_back(def);
-                  }(m);
-    }
+    QueryFile::CoreDef result;
+    const QueryFile::Def &o = *file->def;
+    // Expose some fields of |QueryFile::Def|.
+    result.path = db::toStdString(o.path);
+    std::for_each(o.args.begin(), o.args.end(), [&result](const auto &m) {
+      result.args.emplace_back(m.data());
+    });
+    result.language = o.language;
+    if (param.includes)
+      for (const auto &m : o.includes) {
+        [&result](const QueryFile::Def::IndexInclude &m) {
+          QueryFile::CoreDef::IndexInclude def;
+          def.line = m.line;
+          def.resolved_path = m.resolved_path.data();
+          result.includes.emplace_back(def);
+        }(m);
+      }
     /*
     std::for_each(o.includes.begin(), o.includes.end(),
                   [&result](const QueryFile::Def::IndexInclude &m) {
@@ -85,15 +88,16 @@ void MessageHandler::ccls_fileInfo(JsonReader &reader, ReplyOnce &reply) {
                     result.includes.emplace_back(def);
                   });
   */
-  if (param.skipped_ranges)
-    std::for_each(
-        o.skipped_ranges.begin(), o.skipped_ranges.end(),
-        [&result](const auto &m) { result.skipped_ranges.emplace_back(m); });
-  if (param.dependencies)
-    std::for_each(o.dependencies.begin(), o.dependencies.end(),
-                  [&result](const auto &m) {
-                    result.dependencies.emplace_back(m.data());
-                  });
-  reply(result);
+    if (param.skipped_ranges)
+      std::for_each(
+          o.skipped_ranges.begin(), o.skipped_ranges.end(),
+          [&result](const auto &m) { result.skipped_ranges.emplace_back(m); });
+    if (param.dependencies)
+      std::for_each(o.dependencies.begin(), o.dependencies.end(),
+                    [&result](const auto &m) {
+                      result.dependencies.emplace_back(m.data());
+                    });
+    reply(result);
+  });
 }
 } // namespace ccls

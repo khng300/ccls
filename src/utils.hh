@@ -3,12 +3,15 @@
 
 #pragma once
 
+#include <boost/interprocess/sync/named_sharable_mutex.hpp>
+
 #include <optional>
 #include <string_view>
 
 #include <iterator>
 #include <memory>
 #include <string>
+#include <sys/thr.h>
 #include <utility>
 #include <vector>
 
@@ -130,8 +133,8 @@ public:
 };
 
 template <typename T> struct Vec {
-  using iterator = T*;
-  using const_iterator = const T*;
+  using iterator = T *;
+  using const_iterator = const T *;
 
   std::unique_ptr<T[]> a;
   int s = 0;
@@ -155,4 +158,13 @@ template <typename T> struct Vec {
   const T &operator[](size_t i) const { return a.get()[i]; }
   T &operator[](size_t i) { return a.get()[i]; }
 };
+
+struct NamedSharableMutex : boost::interprocess::named_sharable_mutex {
+  NamedSharableMutex(const std::string &name)
+      : boost::interprocess::named_sharable_mutex(
+            boost::interprocess::open_or_create, name.c_str()) {}
+};
+
+uint64_t generateDBIdentity();
+NamedSharableMutex *getSharableMutex(uint64_t id);
 } // namespace ccls

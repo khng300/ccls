@@ -24,9 +24,18 @@ struct VFS {
     int step;
     int loaded;
   };
-  using StateMapType = db::scoped_unordered_map<db::scoped_string, State>;
-  std::atomic<StateMapType *> state;
-  std::mutex mutex;
+
+  struct DB {
+    uint64_t identity;
+    db::scoped_unordered_map<db::scoped_string, State> map;
+    db::allocator<DB> allocator;
+
+    DB(const db::allocator<DB> &alloc);
+  };
+  std::atomic<DB *> db;
+
+  void startRead(std::function<void()> &&fn);
+  void startWrite(std::function<void()> &&fn);
 
   void clear();
   int loaded(const std::string &path);

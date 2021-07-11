@@ -72,8 +72,8 @@ void doField(MessageHandler *m, Out_cclsMember *entry, const QueryVar &var,
   if (qualified)
     entry1.fieldName += def1->detailed_name;
   else {
-    entry1.fieldName += std::string_view(def1->detailed_name)
-                            .substr(0, def1->qual_name_offset);
+    entry1.fieldName +=
+        std::string_view(def1->detailed_name).substr(0, def1->qual_name_offset);
     entry1.fieldName += def1->name(false);
   }
   if (def1->spell) {
@@ -252,50 +252,52 @@ std::optional<Out_cclsMember> buildInitial(MessageHandler *m, Kind kind,
 } // namespace
 
 void MessageHandler::ccls_member(JsonReader &reader, ReplyOnce &reply) {
-  Param param;
-  reflect(reader, param);
-  std::optional<Out_cclsMember> result;
-  if (param.id.size()) {
-    try {
-      param.usr = std::stoull(param.id);
-    } catch (...) {
-      return;
-    }
-    result.emplace();
-    result->id = std::to_string(param.usr);
-    result->usr = param.usr;
-    // entry.name is empty as it is known by the client.
-    if (!(db->hasType(param.usr) &&
-          expand(this, &*result, param.qualified, param.levels, param.kind)))
-      result.reset();
-  } else {
-    auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
-    if (!wf)
-      return;
-    for (SymbolRef sym : findSymbolsAtLocation(wf, file, param.position)) {
-      switch (sym.kind) {
-      case Kind::Func:
-      case Kind::Type:
-        result = buildInitial(this, sym.kind, sym.usr, param.qualified,
-                              param.levels, param.kind);
-        break;
-      case Kind::Var: {
-        const QueryVar::Def *def = db->getVar(sym).anyDef();
-        if (def && def->type)
-          result = buildInitial(this, Kind::Type, def->type, param.qualified,
+  db->startWrite([&]() {
+    Param param;
+    reflect(reader, param);
+    std::optional<Out_cclsMember> result;
+    if (param.id.size()) {
+      try {
+        param.usr = std::stoull(param.id);
+      } catch (...) {
+        return;
+      }
+      result.emplace();
+      result->id = std::to_string(param.usr);
+      result->usr = param.usr;
+      // entry.name is empty as it is known by the client.
+      if (!(db->hasType(param.usr) &&
+            expand(this, &*result, param.qualified, param.levels, param.kind)))
+        result.reset();
+    } else {
+      auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+      if (!wf)
+        return;
+      for (SymbolRef sym : findSymbolsAtLocation(wf, file, param.position)) {
+        switch (sym.kind) {
+        case Kind::Func:
+        case Kind::Type:
+          result = buildInitial(this, sym.kind, sym.usr, param.qualified,
                                 param.levels, param.kind);
+          break;
+        case Kind::Var: {
+          const QueryVar::Def *def = db->getVar(sym).anyDef();
+          if (def && def->type)
+            result = buildInitial(this, Kind::Type, def->type, param.qualified,
+                                  param.levels, param.kind);
+          break;
+        }
+        default:
+          continue;
+        }
         break;
       }
-      default:
-        continue;
-      }
-      break;
     }
-  }
 
-  if (param.hierarchy)
-    reply(result);
-  else
-    reply(flattenHierarchy(result));
+    if (param.hierarchy)
+      reply(result);
+    else
+      reply(flattenHierarchy(result));
+  });
 }
 } // namespace ccls

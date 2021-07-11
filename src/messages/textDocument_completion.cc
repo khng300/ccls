@@ -491,109 +491,113 @@ public:
 
 void MessageHandler::textDocument_completion(CompletionParam &param,
                                              ReplyOnce &reply) {
-  static CompleteConsumerCache<std::vector<CompletionItem>> cache;
-  std::string path = param.textDocument.uri.getPath();
-  WorkingFile *wf = wfiles->getFile(path);
-  if (!wf) {
-    reply.notOpened(path);
-    return;
-  }
-
-  CompletionList result;
-
-  // It shouldn't be possible, but sometimes vscode will send queries out
-  // of order, ie, we get completion request before buffer content update.
-  std::string buffer_line;
-  if (param.position.line >= 0 && param.position.line < wf->buffer_lines.size())
-    buffer_line = wf->buffer_lines[param.position.line];
-
-  clang::CodeCompleteOptions ccOpts;
-  ccOpts.IncludeBriefComments = true;
-  ccOpts.IncludeCodePatterns = StringRef(buffer_line).ltrim().startswith("#");
-  ccOpts.IncludeFixIts = true;
-  ccOpts.IncludeMacros = true;
-
-  if (param.context.triggerKind == CompletionTriggerKind::TriggerCharacter &&
-      param.context.triggerCharacter) {
-    bool ok = true;
-    int col = param.position.character - 2;
-    switch ((*param.context.triggerCharacter)[0]) {
-    case '"':
-    case '/':
-    case '<':
-      ok = ccOpts.IncludeCodePatterns; // start with #
-      break;
-    case ':':
-      ok = col >= 0 && buffer_line[col] == ':'; // ::
-      break;
-    case '>':
-      ok = col >= 0 && buffer_line[col] == '-'; // ->
-      break;
+  db->startWrite([&]() {
+    static CompleteConsumerCache<std::vector<CompletionItem>> cache;
+    std::string path = param.textDocument.uri.getPath();
+    WorkingFile *wf = wfiles->getFile(path);
+    if (!wf) {
+      reply.notOpened(path);
+      return;
     }
-    if (!ok) {
+
+    CompletionList result;
+
+    // It shouldn't be possible, but sometimes vscode will send queries out
+    // of order, ie, we get completion request before buffer content update.
+    std::string buffer_line;
+    if (param.position.line >= 0 &&
+        param.position.line < wf->buffer_lines.size())
+      buffer_line = wf->buffer_lines[param.position.line];
+
+    clang::CodeCompleteOptions ccOpts;
+    ccOpts.IncludeBriefComments = true;
+    ccOpts.IncludeCodePatterns = StringRef(buffer_line).ltrim().startswith("#");
+    ccOpts.IncludeFixIts = true;
+    ccOpts.IncludeMacros = true;
+
+    if (param.context.triggerKind == CompletionTriggerKind::TriggerCharacter &&
+        param.context.triggerCharacter) {
+      bool ok = true;
+      int col = param.position.character - 2;
+      switch ((*param.context.triggerCharacter)[0]) {
+      case '"':
+      case '/':
+      case '<':
+        ok = ccOpts.IncludeCodePatterns; // start with #
+        break;
+      case ':':
+        ok = col >= 0 && buffer_line[col] == ':'; // ::
+        break;
+      case '>':
+        ok = col >= 0 && buffer_line[col] == '-'; // ->
+        break;
+      }
+      if (!ok) {
+        reply(result);
+        return;
+      }
+    }
+
+    std::string filter;
+    Position end_pos = param.position;
+    Position begin_pos = wf->getCompletionPosition(param.position, &filter);
+
+#if LLVM_VERSION_MAJOR < 8
+    ParseIncludeLineResult preprocess = ParseIncludeLine(buffer_line);
+    if (preprocess.ok && preprocess.keyword.compare("include") == 0) {
+      CompletionList result;
+      char quote = std::string(preprocess.match[5])[0];
+      {
+        std::unique_lock<std::mutex> lock(
+            include_complete->completion_items_mutex, std::defer_lock);
+        if (include_complete->is_scanning)
+          lock.lock();
+        for (auto &item : include_complete->completion_items)
+          if (quote == '\0' || (item.quote_kind_ & 1 && quote == '"') ||
+              (item.quote_kind_ & 2 && quote == '<'))
+            result.items.push_back(item);
+      }
+      begin_pos.character = 0;
+      end_pos.character = (int)buffer_line.size();
+      filterCandidates(result, preprocess.pattern, begin_pos, end_pos,
+                       buffer_line);
+      decorateIncludePaths(preprocess.match, &result.items, quote);
       reply(result);
       return;
     }
-  }
-
-  std::string filter;
-  Position end_pos = param.position;
-  Position begin_pos = wf->getCompletionPosition(param.position, &filter);
-
-#if LLVM_VERSION_MAJOR < 8
-  ParseIncludeLineResult preprocess = ParseIncludeLine(buffer_line);
-  if (preprocess.ok && preprocess.keyword.compare("include") == 0) {
-    CompletionList result;
-    char quote = std::string(preprocess.match[5])[0];
-    {
-      std::unique_lock<std::mutex> lock(
-          include_complete->completion_items_mutex, std::defer_lock);
-      if (include_complete->is_scanning)
-        lock.lock();
-      for (auto &item : include_complete->completion_items)
-        if (quote == '\0' || (item.quote_kind_ & 1 && quote == '"') ||
-            (item.quote_kind_ & 2 && quote == '<'))
-          result.items.push_back(item);
-    }
-    begin_pos.character = 0;
-    end_pos.character = (int)buffer_line.size();
-    filterCandidates(result, preprocess.pattern, begin_pos, end_pos,
-                     buffer_line);
-    decorateIncludePaths(preprocess.match, &result.items, quote);
-    reply(result);
-    return;
-  }
 #endif
 
-  SemaManager::OnComplete callback =
-      [filter, path, begin_pos, end_pos, reply,
-       buffer_line](CodeCompleteConsumer *optConsumer) {
-        if (!optConsumer)
-          return;
-        auto *consumer = static_cast<CompletionConsumer *>(optConsumer);
-        CompletionList result;
-        result.items = consumer->ls_items;
+    SemaManager::OnComplete callback =
+        [filter, path, begin_pos, end_pos, reply,
+         buffer_line](CodeCompleteConsumer *optConsumer) {
+          if (!optConsumer)
+            return;
+          auto *consumer = static_cast<CompletionConsumer *>(optConsumer);
+          CompletionList result;
+          result.items = consumer->ls_items;
 
-        filterCandidates(result, filter, begin_pos, end_pos, buffer_line);
-        reply(result);
-        if (!consumer->from_cache) {
-          cache.withLock([&]() {
-            cache.path = path;
-            cache.line = buffer_line;
-            cache.position = begin_pos;
-            cache.result = consumer->ls_items;
-          });
-        }
-      };
+          filterCandidates(result, filter, begin_pos, end_pos, buffer_line);
+          reply(result);
+          if (!consumer->from_cache) {
+            cache.withLock([&]() {
+              cache.path = path;
+              cache.line = buffer_line;
+              cache.position = begin_pos;
+              cache.result = consumer->ls_items;
+            });
+          }
+        };
 
-  if (cache.isCacheValid(path, buffer_line, begin_pos)) {
-    CompletionConsumer consumer(ccOpts, true);
-    cache.withLock([&]() { consumer.ls_items = cache.result; });
-    callback(&consumer);
-  } else {
-    manager->comp_tasks.pushBack(std::make_unique<SemaManager::CompTask>(
-        reply.id, param.textDocument.uri.getPath(), begin_pos,
-        std::make_unique<CompletionConsumer>(ccOpts, false), ccOpts, callback));
-  }
+    if (cache.isCacheValid(path, buffer_line, begin_pos)) {
+      CompletionConsumer consumer(ccOpts, true);
+      cache.withLock([&]() { consumer.ls_items = cache.result; });
+      callback(&consumer);
+    } else {
+      manager->comp_tasks.pushBack(std::make_unique<SemaManager::CompTask>(
+          reply.id, param.textDocument.uri.getPath(), begin_pos,
+          std::make_unique<CompletionConsumer>(ccOpts, false), ccOpts,
+          callback));
+    }
+  });
 }
 } // namespace ccls

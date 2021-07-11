@@ -419,6 +419,22 @@ using Lid2file_id = std::unordered_map<int, int>;
 // The query database is heavily optimized for fast queries. It is stored
 // in-memory.
 struct DB {
+  struct View {
+    db::scoped_map<int, QueryFile> &files;
+    db::scoped_unordered_map<db::scoped_string, int> &name2file_id;
+    db::scoped_map<Usr, std::size_t> &func_usr, &type_usr, &var_usr;
+    db::scoped_map<std::size_t, QueryFunc> &funcs;
+    db::scoped_map<std::size_t, QueryType> &types;
+    db::scoped_map<std::size_t, QueryVar> &vars;
+    db::allocator<DB> &allocator;
+
+    View(DB &db)
+        : files(db.files), name2file_id(db.name2file_id), func_usr(db.func_usr),
+          type_usr(db.type_usr), var_usr(db.var_usr), funcs(db.funcs),
+          types(db.types), vars(db.vars), allocator(db.allocator) {}
+  };
+
+  uint64_t identity;
   db::scoped_map<int, QueryFile> files;
   db::scoped_unordered_map<db::scoped_string, int> name2file_id;
   db::scoped_map<Usr, std::size_t> func_usr, type_usr, var_usr;
@@ -427,11 +443,11 @@ struct DB {
   db::scoped_map<std::size_t, QueryVar> vars;
   db::allocator<DB> allocator;
 
-  DB(const db::allocator<DB> &alloc)
-      : files(alloc), name2file_id(alloc), func_usr(alloc), type_usr(alloc),
-        var_usr(alloc), funcs(alloc), types(alloc), vars(alloc),
-        allocator(alloc) {}
+  DB(const db::allocator<DB> &alloc);
   void clear();
+
+  void startRead(std::function<void()> &&fn);
+  void startWrite(std::function<void()> &&fn);
 
   template <typename Def>
   void removeUsrs(Kind kind, int file_id,

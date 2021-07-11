@@ -155,17 +155,21 @@ void inheritance(MessageHandler *m, Param &param, ReplyOnce &reply) {
 } // namespace
 
 void MessageHandler::ccls_inheritance(JsonReader &reader, ReplyOnce &reply) {
-  Param param;
-  reflect(reader, param);
-  inheritance(this, param, reply);
+  db->startWrite([&]() {
+    Param param;
+    reflect(reader, param);
+    inheritance(this, param, reply);
+  });
 }
 
 void MessageHandler::textDocument_implementation(
     TextDocumentPositionParam &param, ReplyOnce &reply) {
-  Param param1;
-  param1.textDocument = param.textDocument;
-  param1.position = param.position;
-  param1.derived = true;
-  inheritance(this, param1, reply);
+  db->startWrite([&]() {
+    Param param1;
+    param1.textDocument = param.textDocument;
+    param1.position = param.position;
+    param1.derived = true;
+    inheritance(this, param1, reply);
+  });
 }
 } // namespace ccls

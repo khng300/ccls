@@ -171,38 +171,40 @@ std::optional<Out_cclsCall> buildInitial(MessageHandler *m, Usr root_usr,
 } // namespace
 
 void MessageHandler::ccls_call(JsonReader &reader, ReplyOnce &reply) {
-  Param param;
-  reflect(reader, param);
-  std::optional<Out_cclsCall> result;
-  if (param.id.size()) {
-    try {
-      param.usr = std::stoull(param.id);
-    } catch (...) {
-      return;
-    }
-    result.emplace();
-    result->id = std::to_string(param.usr);
-    result->usr = param.usr;
-    result->callType = CallType::Direct;
-    if (db->hasFunc(param.usr))
-      expand(this, &*result, param.callee, param.callType, param.qualified,
-             param.levels);
-  } else {
-    auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
-    if (!wf)
-      return;
-    for (SymbolRef sym : findSymbolsAtLocation(wf, file, param.position)) {
-      if (sym.kind == Kind::Func) {
-        result = buildInitial(this, sym.usr, param.callee, param.callType,
-                              param.qualified, param.levels);
-        break;
+  db->startWrite([&]() {
+    Param param;
+    reflect(reader, param);
+    std::optional<Out_cclsCall> result;
+    if (param.id.size()) {
+      try {
+        param.usr = std::stoull(param.id);
+      } catch (...) {
+        return;
+      }
+      result.emplace();
+      result->id = std::to_string(param.usr);
+      result->usr = param.usr;
+      result->callType = CallType::Direct;
+      if (db->hasFunc(param.usr))
+        expand(this, &*result, param.callee, param.callType, param.qualified,
+               param.levels);
+    } else {
+      auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+      if (!wf)
+        return;
+      for (SymbolRef sym : findSymbolsAtLocation(wf, file, param.position)) {
+        if (sym.kind == Kind::Func) {
+          result = buildInitial(this, sym.usr, param.callee, param.callType,
+                                param.qualified, param.levels);
+          break;
+        }
       }
     }
-  }
 
-  if (param.hierarchy)
-    reply(result);
-  else
-    reply(flattenHierarchy(result));
+    if (param.hierarchy)
+      reply(result);
+    else
+      reply(flattenHierarchy(result));
+  });
 }
 } // namespace ccls

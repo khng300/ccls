@@ -16,9 +16,12 @@
 
 #include <algorithm>
 #include <assert.h>
+#include <chrono>
 #include <ctype.h>
 #include <errno.h>
 #include <functional>
+#include <mutex>
+#include <random>
 #include <regex>
 #include <string.h>
 #include <unordered_map>
@@ -198,4 +201,35 @@ int reverseSubseqMatch(std::string_view pat, std::string_view text,
 }
 
 std::string getDefaultResourceDirectory() { return CLANG_RESOURCE_DIRECTORY; }
+
+std::unordered_map<uint64_t, std::unique_ptr<NamedSharableMutex>> map;
+std::mutex map_mtx;
+
+uint64_t generateDBIdentity() {
+  uint64_t result;
+  auto rd = std::random_device();
+  struct {
+    time_t time;
+    uint64_t random_number;
+  } combined = {
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()),
+      (uint64_t)rd() << 32 | rd()};
+  const uint8_t k[16] = {0xd0, 0xe5, 0x4d, 0x61, 0x74, 0x63, 0x68, 0x52,
+                         0x61, 0x79, 0xea, 0x70, 0xca, 0x70, 0xf0, 0x0d};
+  (void)siphash(reinterpret_cast<uint8_t *>(&combined), sizeof(combined), k,
+                reinterpret_cast<uint8_t *>(&result), 8);
+  return result;
+}
+
+NamedSharableMutex *getSharableMutex(uint64_t id) {
+  if (id == 0)
+    return nullptr;
+  std::lock_guard<decltype(map_mtx)> lk(map_mtx);
+  auto it = map.find(id);
+  if (it == map.end()) {
+    auto mtx_name = "ccls.shared_mtx." + std::to_string(id);
+    it = map.emplace(id, std::make_unique<NamedSharableMutex>(mtx_name)).first;
+  }
+  return &*it->second;
+}
 } // namespace ccls

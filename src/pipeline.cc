@@ -47,30 +47,67 @@ struct WorkDoneProgressCreateParam {
 REFLECT_STRUCT(WorkDoneProgressCreateParam, token);
 } // namespace
 
+VFS::DB::DB(const db::allocator<DB> &alloc)
+    : identity(generateDBIdentity()), map(alloc), allocator(alloc){};
+
+void VFS::startRead(std::function<void()> &&fn) {
+  auto mtx = getSharableMutex((*db).identity);
+  if (mtx == nullptr) {
+    fn();
+    return;
+  }
+  mtx->lock_sharable();
+  try {
+    fn();
+  } catch (...) {
+    mtx->unlock_sharable();
+    throw;
+  }
+  mtx->unlock_sharable();
+}
+void VFS::startWrite(std::function<void()> &&fn) {
+  auto mtx = getSharableMutex((*db).identity);
+  if (mtx == nullptr) {
+    fn();
+    return;
+  }
+  mtx->lock();
+  try {
+    fn();
+  } catch (...) {
+    mtx->unlock();
+    throw;
+  }
+  mtx->unlock();
+}
+
 void VFS::clear() {
-  std::lock_guard lock(mutex);
-  (*state).clear();
+  startWrite([&]() { (*db).map.clear(); });
 }
 
 int VFS::loaded(const std::string &path) {
-  std::lock_guard lock(mutex);
-  return stateAt(path).loaded;
+  int loaded = false;
+  startWrite([&]() { loaded = stateAt(path).loaded; });
+  return loaded;
 }
 
 bool VFS::stamp(const std::string &path, int64_t ts, int step) {
-  std::lock_guard<std::mutex> lock(mutex);
-  State &st = stateAt(path);
-  if (st.timestamp < ts || (st.timestamp == ts && st.step < step)) {
-    st.timestamp = ts;
-    st.step = step;
-    return true;
-  } else
-    return false;
+  bool result = false;
+  startWrite([&]() {
+    State &st = stateAt(path);
+    if (st.timestamp < ts || (st.timestamp == ts && st.step < step)) {
+      st.timestamp = ts;
+      st.step = step;
+      result = true;
+      return;
+    } else
+      result = false;
+  });
+  return result;
 }
 
 VFS::State &VFS::stateAt(const std::string &path) {
-  StateMapType *s = state;
-  auto it = s->try_emplace(db::toInMemScopedString(path));
+  auto it = (*db).map.try_emplace(db::toInMemScopedString(path));
   return it.first->second;
 }
 
@@ -118,12 +155,17 @@ bool cacheInvalid(VFS *vfs, IndexFile *prev, const std::string &path,
                   const std::vector<const char *> &args,
                   const std::optional<std::string> &from) {
   {
-    std::lock_guard<std::mutex> lock(vfs->mutex);
-    if (prev->mtime < vfs->stateAt(path).timestamp) {
-      LOG_V(1) << "timestamp changed for " << path
-               << (from ? " (via " + *from + ")" : std::string());
+    bool ts_changed = false;
+    vfs->startRead([&]() {
+      if (prev->mtime < vfs->stateAt(path).timestamp) {
+        LOG_V(1) << "timestamp changed for " << path
+                 << (from ? " (via " + *from + ")" : std::string());
+        ts_changed = true;
+        return;
+      }
+    });
+    if (ts_changed)
       return true;
-    }
   }
 
   // For inferred files, allow -o a a.cc -> -o b b.cc
@@ -260,10 +302,11 @@ bool indexer_Parse(SemaManager *completion, WorkingFiles *wfiles,
 
   if (g_config->index.onChange) {
     reparse = 2;
-    std::lock_guard lock(vfs->mutex);
-    vfs->stateAt(path_to_index).step = 0;
-    if (request.path != path_to_index)
-      vfs->stateAt(request.path).step = 0;
+    vfs->startWrite([&]() {
+      vfs->stateAt(path_to_index).step = 0;
+      if (request.path != path_to_index)
+        vfs->stateAt(request.path).step = 0;
+    });
   }
   bool track = g_config->index.trackDependency > 1 ||
                (g_config->index.trackDependency == 1 && request.ts < loaded_ts);
@@ -307,11 +350,12 @@ bool indexer_Parse(SemaManager *completion, WorkingFiles *wfiles,
       on_indexed->pushBack(std::move(update),
                            request.mode != IndexMode::Background);
       {
-        std::lock_guard lock1(vfs->mutex);
-        VFS::State &st = vfs->stateAt(path_to_index);
-        st.loaded++;
-        if (prev->no_linkage)
-          st.step = 2;
+        vfs->startWrite([&]() {
+          VFS::State &st = vfs->stateAt(path_to_index);
+          st.loaded++;
+          if (prev->no_linkage)
+            st.step = 2;
+        });
       }
       lock.unlock();
 
@@ -324,14 +368,20 @@ bool indexer_Parse(SemaManager *completion, WorkingFiles *wfiles,
         if (!prev)
           continue;
         {
-          std::lock_guard lock2(vfs->mutex);
-          VFS::State &st = vfs->stateAt(path);
-          if (st.loaded)
+          bool loaded = false;
+          vfs->startWrite([&]() {
+            VFS::State &st = vfs->stateAt(path);
+            if (st.loaded) {
+              loaded = true;
+              return;
+            }
+            st.loaded++;
+            st.timestamp = prev->mtime;
+            if (prev->no_linkage)
+              st.step = 3;
+          });
+          if (loaded)
             continue;
-          st.loaded++;
-          st.timestamp = prev->mtime;
-          if (prev->no_linkage)
-            st.step = 3;
         }
         IndexUpdate update = IndexUpdate::createDelta(nullptr, prev.get());
         on_indexed->pushBack(std::move(update),
@@ -433,8 +483,7 @@ bool indexer_Parse(SemaManager *completion, WorkingFiles *wfiles,
       on_indexed->pushBack(IndexUpdate::createDelta(prev.get(), curr.get()),
                            request.mode != IndexMode::Background);
       {
-        std::lock_guard lock1(vfs->mutex);
-        vfs->stateAt(path).loaded++;
+        vfs->startWrite([&]() { vfs->stateAt(path).loaded++; });
       }
       if (entry.id >= 0) {
         std::lock_guard lock(project->mtx);
@@ -495,36 +544,38 @@ void indexer_Main(SemaManager *manager, VFS *vfs, Project *project,
 }
 
 void main_OnIndexed(DB *db, WorkingFiles *wfiles, IndexUpdate *update) {
-  if (update->refresh) {
-    LOG_S(INFO)
-        << "loaded project. Refresh semantic highlight for all working file.";
-    std::lock_guard lock(wfiles->mutex);
-    for (auto &[f, wf] : wfiles->files) {
-      auto it = db->name2file_id.find(
-          db::toInMemScopedString(lowerPathIfInsensitive(f)));
-      if (it == db->name2file_id.end())
-        continue;
-      QueryFile &file = db->files[it->second];
-      emitSemanticHighlight(db, wf.get(), file);
+  db->startWrite([&]() {
+    if (update->refresh) {
+      LOG_S(INFO)
+          << "loaded project. Refresh semantic highlight for all working file.";
+      std::lock_guard lock(wfiles->mutex);
+      for (auto &[f, wf] : wfiles->files) {
+        auto it = db->name2file_id.find(
+            db::toInMemScopedString(lowerPathIfInsensitive(f)));
+        if (it == db->name2file_id.end())
+          continue;
+        QueryFile &file = db->files[it->second];
+        emitSemanticHighlight(db, wf.get(), file);
+      }
+      return;
     }
-    return;
-  }
 
-  db->applyIndexUpdate(update);
+    db->applyIndexUpdate(update);
 
-  // Update indexed content, skipped ranges, and semantic highlighting.
-  if (update->files_def_update) {
-    auto &def_u = *update->files_def_update;
-    if (WorkingFile *wfile = wfiles->getFile(def_u.first.path)) {
-      // FIXME With index.onChange: true, use buffer_content only for
-      // request.path
-      wfile->setIndexContent(g_config->index.onChange ? wfile->buffer_content
-                                                      : def_u.second);
-      QueryFile &file = db->files[update->file_id];
-      emitSkippedRanges(wfile, file);
-      emitSemanticHighlight(db, wfile, file);
+    // Update indexed content, skipped ranges, and semantic highlighting.
+    if (update->files_def_update) {
+      auto &def_u = *update->files_def_update;
+      if (WorkingFile *wfile = wfiles->getFile(def_u.first.path)) {
+        // FIXME With index.onChange: true, use buffer_content only for
+        // request.path
+        wfile->setIndexContent(g_config->index.onChange ? wfile->buffer_content
+                                                        : def_u.second);
+        QueryFile &file = db->files[update->file_id];
+        emitSkippedRanges(wfile, file);
+        emitSemanticHighlight(db, wfile, file);
+      }
     }
-  }
+  });
 }
 
 void launchStdin() {
@@ -627,10 +678,13 @@ void launchStdout() {
 void mainLoop() {
   Project project;
   WorkingFiles wfiles;
-  VFS vfs;
   auto inmem_allocator = db::getAlloc();
-  VFS::StateMapType vfs_state(inmem_allocator);
-  vfs.state = &vfs_state;
+  DB in_memory_db(inmem_allocator);
+  in_memory_db.identity = 0;
+  VFS::DB vfs_db(inmem_allocator);
+  vfs_db.identity = 0;
+  VFS vfs;
+  vfs.db = &vfs_db;
 
   SemaManager manager(
       &project, &wfiles,
@@ -650,7 +704,6 @@ void mainLoop() {
       });
 
   IncludeComplete include_complete(&project);
-  DB in_memory_db(inmem_allocator);
 
   // Setup shared references.
   MessageHandler handler;

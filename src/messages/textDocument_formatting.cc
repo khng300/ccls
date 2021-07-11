@@ -69,35 +69,41 @@ void format(ReplyOnce &reply, WorkingFile *wfile, tooling::Range range) {
 
 void MessageHandler::textDocument_formatting(DocumentFormattingParam &param,
                                              ReplyOnce &reply) {
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
-  if (!wf)
-    return;
-  format(reply, wf, {0, (unsigned)wf->buffer_content.size()});
+  db->startWrite([&]() {
+    auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+    if (!wf)
+      return;
+    format(reply, wf, {0, (unsigned)wf->buffer_content.size()});
+  });
 }
 
 void MessageHandler::textDocument_onTypeFormatting(
     DocumentOnTypeFormattingParam &param, ReplyOnce &reply) {
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
-  if (!wf) {
-    return;
-  }
-  std::string_view code = wf->buffer_content;
-  int pos = getOffsetForPosition(param.position, code);
-  auto lbrace = code.find_last_of('{', pos);
-  if (lbrace == std::string::npos)
-    lbrace = pos;
-  format(reply, wf, {(unsigned)lbrace, unsigned(pos - lbrace)});
+  db->startWrite([&]() {
+    auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+    if (!wf) {
+      return;
+    }
+    std::string_view code = wf->buffer_content;
+    int pos = getOffsetForPosition(param.position, code);
+    auto lbrace = code.find_last_of('{', pos);
+    if (lbrace == std::string::npos)
+      lbrace = pos;
+    format(reply, wf, {(unsigned)lbrace, unsigned(pos - lbrace)});
+  });
 }
 
 void MessageHandler::textDocument_rangeFormatting(
     DocumentRangeFormattingParam &param, ReplyOnce &reply) {
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
-  if (!wf) {
-    return;
-  }
-  std::string_view code = wf->buffer_content;
-  int begin = getOffsetForPosition(param.range.start, code),
-      end = getOffsetForPosition(param.range.end, code);
-  format(reply, wf, {(unsigned)begin, unsigned(end - begin)});
+  db->startWrite([&]() {
+    auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+    if (!wf) {
+      return;
+    }
+    std::string_view code = wf->buffer_content;
+    int begin = getOffsetForPosition(param.range.start, code),
+        end = getOffsetForPosition(param.range.end, code);
+    format(reply, wf, {(unsigned)begin, unsigned(end - begin)});
+  });
 }
 } // namespace ccls

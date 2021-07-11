@@ -25,8 +25,10 @@ void MessageHandler::ccls_reload(JsonReader &reader) {
   reflect(reader, param);
   // Send index requests for every file.
   if (param.whitelist.empty() && param.blacklist.empty()) {
-    vfs->clear();
-    db->clear();
+    db->startWrite([&]() {
+      vfs->clear();
+      db->clear();
+    });
     project->index(wfiles, RequestId());
     manager->clear();
     return;

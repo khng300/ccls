@@ -7,6 +7,7 @@
 #include "serializer.hh"
 
 #include <rapidjson/document.h>
+#include <siphash.h>
 
 #include <assert.h>
 #include <functional>
@@ -80,7 +81,6 @@ bool tryReplaceDef(db::scoped_vector<Q> &def_list, Q &&def) {
     }
   return false;
 }
-
 } // namespace
 
 QueryFile::Def convert(const QueryFile::CoreDef &o) {
@@ -227,6 +227,11 @@ IndexUpdate IndexUpdate::createDelta(IndexFile *previous, IndexFile *current) {
   return r;
 }
 
+DB::DB(const db::allocator<DB> &alloc)
+    : identity(generateDBIdentity()), files(alloc), name2file_id(alloc),
+      func_usr(alloc), type_usr(alloc), var_usr(alloc), funcs(alloc),
+      types(alloc), vars(alloc), allocator(alloc) {}
+
 void DB::clear() {
   files.clear();
   name2file_id.clear();
@@ -236,6 +241,37 @@ void DB::clear() {
   funcs.clear();
   types.clear();
   vars.clear();
+}
+
+void DB::startRead(std::function<void()> &&fn) {
+  auto mtx = getSharableMutex(identity);
+  if (mtx == nullptr) {
+    fn();
+    return;
+  }
+  mtx->lock_sharable();
+  try {
+    fn();
+  } catch (...) {
+    mtx->unlock_sharable();
+    throw;
+  }
+  mtx->unlock_sharable();
+}
+void DB::startWrite(std::function<void()> &&fn) {
+  auto mtx = getSharableMutex(identity);
+  if (mtx == nullptr) {
+    fn();
+    return;
+  }
+  mtx->lock();
+  try {
+    fn();
+  } catch (...) {
+    mtx->unlock();
+    throw;
+  }
+  mtx->unlock();
 }
 
 template <typename Def>

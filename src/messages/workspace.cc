@@ -145,69 +145,73 @@ bool addSymbol(
 
 void MessageHandler::workspace_symbol(WorkspaceSymbolParam &param,
                                       ReplyOnce &reply) {
-  std::vector<SymbolInformation> result;
-  const std::string &query = param.query;
-  for (auto &folder : param.folders)
-    ensureEndsInSlash(folder);
-  std::vector<uint8_t> file_set = db->getFileSet(param.folders);
+  db->startRead([&]() {
+    std::vector<SymbolInformation> result;
+    const std::string &query = param.query;
+    for (auto &folder : param.folders)
+      ensureEndsInSlash(folder);
+    std::vector<uint8_t> file_set = db->getFileSet(param.folders);
 
-  // {symbol info, matching detailed_name or short_name, index}
-  std::vector<std::tuple<SymbolInformation, int, SymbolIdx>> cands;
-  bool sensitive = g_config->workspaceSymbol.caseSensitivity;
+    // {symbol info, matching detailed_name or short_name, index}
+    std::vector<std::tuple<SymbolInformation, int, SymbolIdx>> cands;
+    bool sensitive = g_config->workspaceSymbol.caseSensitivity;
 
-  // Find subsequence matches.
-  std::string query_without_space;
-  query_without_space.reserve(query.size());
-  for (char c : query)
-    if (!isspace(c))
-      query_without_space += c;
+    // Find subsequence matches.
+    std::string query_without_space;
+    query_without_space.reserve(query.size());
+    for (char c : query)
+      if (!isspace(c))
+        query_without_space += c;
 
-  auto add = [&](SymbolIdx sym) {
-    std::string_view detailed_name = db->getSymbolName(sym, true);
-    int pos = reverseSubseqMatch(query_without_space, detailed_name, sensitive);
-    return pos >= 0 &&
-           addSymbol(db, wfiles, file_set, sym,
-                     detailed_name.find(':', pos) != std::string::npos,
-                     &cands) &&
-           cands.size() >= g_config->workspaceSymbol.maxNum;
-  };
-  for (auto &[_, func] : db->funcs)
-    if (add({func.usr, Kind::Func}))
-      goto done_add;
-  for (auto &[_, type] : db->types)
-    if (add({type.usr, Kind::Type}))
-      goto done_add;
-  for (auto &[_, var] : db->vars)
-    if (var.def.size() && !var.def[0].is_local() && add({var.usr, Kind::Var}))
-      goto done_add;
-done_add:
+    auto add = [&](SymbolIdx sym) {
+      std::string_view detailed_name = db->getSymbolName(sym, true);
+      int pos =
+          reverseSubseqMatch(query_without_space, detailed_name, sensitive);
+      return pos >= 0 &&
+             addSymbol(db, wfiles, file_set, sym,
+                       detailed_name.find(':', pos) != std::string::npos,
+                       &cands) &&
+             cands.size() >= g_config->workspaceSymbol.maxNum;
+    };
+    for (auto &[_, func] : db->funcs)
+      if (add({func.usr, Kind::Func}))
+        goto done_add;
+    for (auto &[_, type] : db->types)
+      if (add({type.usr, Kind::Type}))
+        goto done_add;
+    for (auto &[_, var] : db->vars)
+      if (var.def.size() && !var.def[0].is_local() && add({var.usr, Kind::Var}))
+        goto done_add;
+  done_add:
 
-  if (g_config->workspaceSymbol.sort && query.size() <= FuzzyMatcher::kMaxPat) {
-    // Sort results with a fuzzy matching algorithm.
-    int longest = 0;
-    for (auto &cand : cands)
-      longest = std::max(
-          longest, int(db->getSymbolName(std::get<2>(cand), true).size()));
-    FuzzyMatcher fuzzy(query, g_config->workspaceSymbol.caseSensitivity);
-    for (auto &cand : cands)
-      std::get<1>(cand) = fuzzy.match(
-          db->getSymbolName(std::get<2>(cand), std::get<1>(cand)), false);
-    std::sort(cands.begin(), cands.end(), [](const auto &l, const auto &r) {
-      return std::get<1>(l) > std::get<1>(r);
-    });
-    result.reserve(cands.size());
-    for (auto &cand : cands) {
-      // Discard awful candidates.
-      if (std::get<1>(cand) <= FuzzyMatcher::kMinScore)
-        break;
-      result.push_back(std::get<0>(cand));
+    if (g_config->workspaceSymbol.sort &&
+        query.size() <= FuzzyMatcher::kMaxPat) {
+      // Sort results with a fuzzy matching algorithm.
+      int longest = 0;
+      for (auto &cand : cands)
+        longest = std::max(
+            longest, int(db->getSymbolName(std::get<2>(cand), true).size()));
+      FuzzyMatcher fuzzy(query, g_config->workspaceSymbol.caseSensitivity);
+      for (auto &cand : cands)
+        std::get<1>(cand) = fuzzy.match(
+            db->getSymbolName(std::get<2>(cand), std::get<1>(cand)), false);
+      std::sort(cands.begin(), cands.end(), [](const auto &l, const auto &r) {
+        return std::get<1>(l) > std::get<1>(r);
+      });
+      result.reserve(cands.size());
+      for (auto &cand : cands) {
+        // Discard awful candidates.
+        if (std::get<1>(cand) <= FuzzyMatcher::kMinScore)
+          break;
+        result.push_back(std::get<0>(cand));
+      }
+    } else {
+      result.reserve(cands.size());
+      for (auto &cand : cands)
+        result.push_back(std::get<0>(cand));
     }
-  } else {
-    result.reserve(cands.size());
-    for (auto &cand : cands)
-      result.push_back(std::get<0>(cand));
-  }
 
-  reply(result);
+    reply(result);
+  });
 }
 } // namespace ccls
