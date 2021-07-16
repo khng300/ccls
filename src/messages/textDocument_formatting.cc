@@ -69,7 +69,7 @@ void format(ReplyOnce &reply, WorkingFile *wfile, tooling::Range range) {
 
 void MessageHandler::textDocument_formatting(DocumentFormattingParam &param,
                                              ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
     if (!wf)
       return;
@@ -79,7 +79,7 @@ void MessageHandler::textDocument_formatting(DocumentFormattingParam &param,
 
 void MessageHandler::textDocument_onTypeFormatting(
     DocumentOnTypeFormattingParam &param, ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
     if (!wf) {
       return;
@@ -95,7 +95,7 @@ void MessageHandler::textDocument_onTypeFormatting(
 
 void MessageHandler::textDocument_rangeFormatting(
     DocumentRangeFormattingParam &param, ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
     if (!wf) {
       return;

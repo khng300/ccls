@@ -17,7 +17,7 @@ REFLECT_STRUCT(Param, textDocument, position, kind);
 } // namespace
 
 void MessageHandler::ccls_vars(JsonReader &reader, ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     Param param;
     reflect(reader, param);
     auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);

@@ -543,8 +543,9 @@ void indexer_Main(SemaManager *manager, VFS *vfs, Project *project,
         break;
 }
 
-void main_OnIndexed(DB *db, WorkingFiles *wfiles, IndexUpdate *update) {
-  db->startWrite([&]() {
+void main_OnIndexed(QueryStore *db_stor, WorkingFiles *wfiles,
+                    IndexUpdate *update) {
+  db_stor->startWrite([&](DB *db) {
     if (update->refresh) {
       LOG_S(INFO)
           << "loaded project. Refresh semantic highlight for all working file.";
@@ -679,8 +680,7 @@ void mainLoop() {
   Project project;
   WorkingFiles wfiles;
   auto inmem_allocator = db::getAlloc();
-  DB in_memory_db(inmem_allocator);
-  in_memory_db.identity = 0;
+  QueryStore in_memory_db(inmem_allocator, true);
   VFS::DB vfs_db(inmem_allocator);
   vfs_db.identity = 0;
   VFS vfs;

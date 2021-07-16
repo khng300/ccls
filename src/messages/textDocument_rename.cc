@@ -53,7 +53,7 @@ WorkspaceEdit buildWorkspaceEdit(DB *db, WorkingFiles *wfiles, SymbolRef sym,
 } // namespace
 
 void MessageHandler::textDocument_rename(RenameParam &param, ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
     if (!wf)
       return;

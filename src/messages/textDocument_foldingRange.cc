@@ -19,7 +19,7 @@ REFLECT_STRUCT(FoldingRange, startLine, startCharacter, endLine, endCharacter,
 
 void MessageHandler::textDocument_foldingRange(TextDocumentParam &param,
                                                ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
     if (!wf)
       return;

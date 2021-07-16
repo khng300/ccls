@@ -11,7 +11,7 @@
 namespace ccls {
 void MessageHandler::textDocument_declaration(TextDocumentPositionParam &param,
                                               ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     int file_id;
     auto [file, wf] =
         findOrFail(param.textDocument.uri.getPath(), reply, &file_id);
@@ -32,7 +32,7 @@ void MessageHandler::textDocument_declaration(TextDocumentPositionParam &param,
 
 void MessageHandler::textDocument_definition(TextDocumentPositionParam &param,
                                              ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     int file_id;
     auto [file, wf] =
         findOrFail(param.textDocument.uri.getPath(), reply, &file_id);
@@ -133,11 +133,11 @@ void MessageHandler::textDocument_definition(TextDocumentPositionParam &param,
             }
           }
         };
-        for (auto &[_, func] : db->funcs)
+        for (auto &func : db->funcs)
           fn({func.usr, Kind::Func});
-        for (auto &[_, type] : db->types)
+        for (auto &type : db->types)
           fn({type.usr, Kind::Type});
-        for (auto &[_, var] : db->vars)
+        for (auto &var : db->vars)
           if (var.def.size() && !var.def[0].is_local())
             fn({var.usr, Kind::Var});
 
@@ -156,7 +156,7 @@ void MessageHandler::textDocument_definition(TextDocumentPositionParam &param,
 
 void MessageHandler::textDocument_typeDefinition(
     TextDocumentPositionParam &param, ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
     if (!file)
       return;

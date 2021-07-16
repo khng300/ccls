@@ -94,7 +94,15 @@ template <typename T1> allocator<T1> getAlloc(Handle mgr) {
   res.mgr = mgr;
   return res;
 }
-
 } // namespace impl
+
+using Handle = impl::Handle;
+template <typename T> using allocator = impl::allocator<T>;
+template <typename T> allocator<T> getAlloc(Handle handle = {}) {
+  return impl::getAlloc<T>(handle);
+}
+inline allocator<void> getAlloc(Handle handle = {}) {
+  return impl::getAlloc<void>(handle);
+}
 } // namespace db
 } // namespace ccls

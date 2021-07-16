@@ -31,7 +31,7 @@ REFLECT_STRUCT(Out_cclsInfo, db, pipeline, project);
 
 void MessageHandler::ccls_info(EmptyParam &, ReplyOnce &reply) {
   Out_cclsInfo result;
-  db->startRead([&]() {
+  db->startRead([&](DB *db) {
     result.db.files = db->files.size();
     result.db.funcs = db->funcs.size();
     result.db.types = db->types.size();
@@ -55,7 +55,7 @@ REFLECT_STRUCT(FileInfoParam, textDocument, dependencies, includes,
                skipped_ranges);
 
 void MessageHandler::ccls_fileInfo(JsonReader &reader, ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     FileInfoParam param;
     reflect(reader, param);
     QueryFile *file = findFile(param.textDocument.uri.getPath());

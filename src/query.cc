@@ -6,6 +6,8 @@
 #include "pipeline.hh"
 #include "serializer.hh"
 
+#include <llvm/ADT/ScopeExit.h>
+
 #include <rapidjson/document.h>
 #include <siphash.h>
 
@@ -13,6 +15,7 @@
 #include <functional>
 #include <limits.h>
 #include <optional>
+#include <stack>
 #include <stdint.h>
 #include <string>
 #include <unordered_map>
@@ -81,6 +84,8 @@ bool tryReplaceDef(db::scoped_vector<Q> &def_list, Q &&def) {
     }
   return false;
 }
+
+thread_local std::unordered_set<QueryStore *> t_writing_txn;
 } // namespace
 
 QueryFile::Def convert(const QueryFile::CoreDef &o) {
@@ -227,10 +232,10 @@ IndexUpdate IndexUpdate::createDelta(IndexFile *previous, IndexFile *current) {
   return r;
 }
 
-DB::DB(const db::allocator<DB> &alloc)
-    : identity(generateDBIdentity()), files(alloc), name2file_id(alloc),
-      func_usr(alloc), type_usr(alloc), var_usr(alloc), funcs(alloc),
-      types(alloc), vars(alloc), allocator(alloc) {}
+QueryStore::QueryStore(const db::allocator<QueryStore> &alloc, bool priv)
+    : identity(priv ? 0 : generateDBIdentity()), files(alloc),
+      name2file_id(alloc), func_usr(alloc), type_usr(alloc), var_usr(alloc),
+      funcs(alloc), types(alloc), vars(alloc), allocator(alloc) {}
 
 void DB::clear() {
   files.clear();
@@ -243,35 +248,48 @@ void DB::clear() {
   vars.clear();
 }
 
-void DB::startRead(std::function<void()> &&fn) {
+void QueryStore::startRead(std::function<void(DB *db)> &&fn) {
+  DB *db = static_cast<DB *>(this);
   auto mtx = getSharableMutex(identity);
-  if (mtx == nullptr) {
-    fn();
-    return;
-  }
-  mtx->lock_sharable();
-  try {
-    fn();
-  } catch (...) {
+  bool locked = false;
+  auto scope_exit = llvm::make_scope_exit([&]() {
+    if (!locked)
+      return;
     mtx->unlock_sharable();
-    throw;
+  });
+  if (mtx != nullptr || t_writing_txn.count(this) != 0) {
+    fn(db);
+  } else {
+    mtx->lock_sharable();
+    locked = true;
+    try {
+      fn(db);
+    } catch (...) {
+      throw;
+    }
   }
-  mtx->unlock_sharable();
 }
-void DB::startWrite(std::function<void()> &&fn) {
+void QueryStore::startWrite(std::function<void(DB *db)> &&fn) {
+  DB *db = static_cast<DB *>(this);
   auto mtx = getSharableMutex(identity);
-  if (mtx == nullptr) {
-    fn();
-    return;
-  }
-  mtx->lock();
-  try {
-    fn();
-  } catch (...) {
+  bool locked = false;
+  auto scope_exit = llvm::make_scope_exit([&]() {
+    if (!locked)
+      return;
     mtx->unlock();
-    throw;
+    t_writing_txn.erase(this);
+  });
+  if (mtx == nullptr || !t_writing_txn.emplace(this).second) {
+    fn(db);
+  } else {
+    mtx->lock();
+    locked = true;
+    try {
+      fn(db);
+    } catch (...) {
+      throw;
+    }
   }
-  mtx->unlock();
 }
 
 template <typename Def>
@@ -330,7 +348,7 @@ void DB::applyIndexUpdate(IndexUpdate *u) {
   for (auto &it : u->C##s_##F) {                                               \
     auto r = C##_usr.try_emplace({it.first}, C##_usr.size());                  \
     if (r.second)                                                              \
-      C##s[r.first->second].usr = it.first;                                    \
+      C##s.emplace_back().usr = it.first;                                      \
     auto &entity = C##s[r.first->second];                                      \
     removeRange(entity.F, it.second.first);                                    \
     addRange(entity.F, it.second.second);                                      \
@@ -372,35 +390,37 @@ void DB::applyIndexUpdate(IndexUpdate *u) {
       files[dr.file_id].symbol2refcnt.erase(sym);
   };
 
-  auto updateUses = [&](Usr usr, Kind kind, auto &entity_usr, auto &entities,
-                        auto &p, bool hint_implicit) {
-    auto r = entity_usr.try_emplace(usr, entity_usr.size());
-    if (r.second)
-      entities[r.first->second].usr = usr;
-    auto &entity = entities[r.first->second];
-    for (Use &use : p.first) {
-      if (hint_implicit && use.role & Role::Implicit) {
-        // Make ranges of implicit function calls larger (spanning one more
-        // column to the left/right). This is hacky but useful. e.g.
-        // textDocument/definition on the space/semicolon in `A a;` or `
-        // 42;` will take you to the constructor.
-        if (use.range.start.column > 0)
-          use.range.start.column--;
-        use.range.end.column++;
-      }
-      ref(prev_lid2file_id, usr, kind, use, -1);
-    }
-    removeRange(entity.uses, p.first);
-    for (Use &use : p.second) {
-      if (hint_implicit && use.role & Role::Implicit) {
-        if (use.range.start.column > 0)
-          use.range.start.column--;
-        use.range.end.column++;
-      }
-      ref(lid2file_id, usr, kind, use, 1);
-    }
-    addRange(entity.uses, p.second);
-  };
+  auto updateUses =
+      [&](Usr usr, Kind kind,
+          ccls::db::scoped_unordered_map<Usr, std::size_t> &entity_usr,
+          auto &entities, auto &p, bool hint_implicit) {
+        auto r = entity_usr.try_emplace(usr, entity_usr.size());
+        if (r.second)
+          entities.emplace_back().usr = usr;
+        auto &entity = entities[r.first->second];
+        for (Use &use : p.first) {
+          if (hint_implicit && use.role & Role::Implicit) {
+            // Make ranges of implicit function calls larger (spanning one more
+            // column to the left/right). This is hacky but useful. e.g.
+            // textDocument/definition on the space/semicolon in `A a;` or `
+            // 42;` will take you to the constructor.
+            if (use.range.start.column > 0)
+              use.range.start.column--;
+            use.range.end.column++;
+          }
+          ref(prev_lid2file_id, usr, kind, use, -1);
+        }
+        removeRange(entity.uses, p.first);
+        for (Use &use : p.second) {
+          if (hint_implicit && use.role & Role::Implicit) {
+            if (use.range.start.column > 0)
+              use.range.start.column--;
+            use.range.end.column++;
+          }
+          ref(lid2file_id, usr, kind, use, 1);
+        }
+        addRange(entity.uses, p.second);
+      };
 
   if (u->files_removed) {
     auto it = name2file_id.find(
@@ -468,7 +488,7 @@ int DB::getFileId(const std::string &path) {
   size_t id = files.size();
   auto it = name2file_id.try_emplace(norm_path, id);
   if (it.second)
-    files[it.first->second].id = id;
+    files.emplace_back().id = id;
   return it.first->second;
 }
 
@@ -494,7 +514,7 @@ void DB::update(const Lid2file_id &lid2file_id, int file_id,
 
     auto r = func_usr.try_emplace({u.first}, func_usr.size());
     if (r.second)
-      funcs.try_emplace(r.first->second);
+      funcs.emplace_back();
     QueryFunc &existing = funcs[r.first->second];
     existing.usr = u.first;
     if (!tryReplaceDef(existing.def, std::move(def)))
@@ -516,7 +536,7 @@ void DB::update(const Lid2file_id &lid2file_id, int file_id,
     }
     auto r = type_usr.try_emplace({u.first}, type_usr.size());
     if (r.second)
-      types.try_emplace(r.first->second);
+      types.emplace_back();
     QueryType &existing = types[r.first->second];
     existing.usr = u.first;
     if (!tryReplaceDef(existing.def, std::move(def)))
@@ -538,7 +558,7 @@ void DB::update(const Lid2file_id &lid2file_id, int file_id,
     }
     auto r = var_usr.try_emplace({u.first}, var_usr.size());
     if (r.second)
-      vars.try_emplace(r.first->second);
+      vars.emplace_back();
     QueryVar &existing = vars[r.first->second];
     existing.usr = u.first;
     if (!tryReplaceDef(existing.def, std::move(def)))
@@ -546,7 +566,7 @@ void DB::update(const Lid2file_id &lid2file_id, int file_id,
   }
 }
 
-std::string_view DB::getSymbolName(SymbolIdx sym, bool qualified) {
+std::string_view DB::getSymbolName(SymbolIdx sym, bool qualified) const {
   Usr usr = sym.usr;
   switch (sym.kind) {
   default:
@@ -571,11 +591,12 @@ std::string_view DB::getSymbolName(SymbolIdx sym, bool qualified) {
   return "";
 }
 
-std::vector<uint8_t> DB::getFileSet(const std::vector<std::string> &folders) {
+std::vector<uint8_t>
+DB::getFileSet(const std::vector<std::string> &folders) const {
   if (folders.empty())
     return std::vector<uint8_t>(files.size(), 1);
   std::vector<uint8_t> file_set(files.size());
-  for (auto &[_, file] : files)
+  for (auto &file : files)
     if (file.def) {
       bool ok = false;
       for (auto &folder : folders)
@@ -625,9 +646,6 @@ Maybe<DeclRef> getDefinitionSpell(DB *db, SymbolIdx sym) {
 
 std::vector<Use> getFuncDeclarations(DB *db,
                                      const db::scoped_vector<Usr> &usrs) {
-  return getDeclarations(db->func_usr, db->funcs, usrs);
-}
-std::vector<Use> getFuncDeclarations(DB *db, const Vec<Usr> &usrs) {
   return getDeclarations(db->func_usr, db->funcs, usrs);
 }
 std::vector<Use> getTypeDeclarations(DB *db,
@@ -761,15 +779,6 @@ DocumentUri getLsDocumentUri(DB *db, int file_id, std::string *path) {
   }
 }
 
-DocumentUri getLsDocumentUri(DB *db, int file_id) {
-  QueryFile &file = db->files[file_id];
-  if (file.def) {
-    return DocumentUri::fromPath(db::toStdString(file.def->path));
-  } else {
-    return DocumentUri::fromPath("");
-  }
-}
-
 std::optional<Location> getLsLocation(DB *db, WorkingFiles *wfiles, Use use) {
   std::string path;
   DocumentUri uri = getLsDocumentUri(db, use.file_id, &path);
@@ -814,13 +823,13 @@ SymbolKind getSymbolKind(DB *db, SymbolIdx sym) {
   return ret;
 }
 
-std::optional<SymbolInformation> getSymbolInfo(DB *db, SymbolIdx sym,
+std::optional<SymbolInformation> getSymbolInfo(const DB *db, SymbolIdx sym,
                                                bool detailed) {
   switch (sym.kind) {
   case Kind::Invalid:
     break;
   case Kind::File: {
-    QueryFile &file = db->getFile(sym);
+    const QueryFile &file = db->getFile(sym);
     if (!file.def)
       break;
 

@@ -309,7 +309,8 @@ void do_initialize(MessageHandler *m, InitializeParam &param,
     sys::fs::create_directories(g_config->cache.directory);
     m->map_file = db::impl::createManagedMappedFile(g_config->cache.directory);
     auto allocator = db::getAlloc(m->map_file.get_segment_manager());
-    m->db = m->map_file.find_or_construct<DB>("DB")(allocator);
+    m->db =
+        m->map_file.find_or_construct<QueryStore>("QueryStore")(allocator);
     m->vfs->db = m->map_file.find_or_construct<VFS::DB>("VFS::DB")(allocator);
     LOG_S(INFO) << "Database switched.";
   }

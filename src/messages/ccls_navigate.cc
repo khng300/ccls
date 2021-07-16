@@ -27,7 +27,7 @@ Maybe<Range> findParent(QueryFile *file, Pos pos) {
 } // namespace
 
 void MessageHandler::ccls_navigate(JsonReader &reader, ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     Param param;
     reflect(reader, param);
     auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);

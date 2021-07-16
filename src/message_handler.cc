@@ -235,19 +235,21 @@ void MessageHandler::run(InMessage &msg) {
 
 QueryFile *MessageHandler::findFile(const std::string &path, int *out_file_id) {
   QueryFile *ret = nullptr;
-  auto it = db->name2file_id.find(
-      db::toInMemScopedString(lowerPathIfInsensitive(path)));
-  if (it != db->name2file_id.end()) {
-    QueryFile &file = db->files[it->second];
-    if (file.def) {
-      ret = &file;
-      if (out_file_id)
-        *out_file_id = it->second;
-      return ret;
+  db->startRead([&](DB *db) {
+    auto it = db->name2file_id.find(
+        db::toInMemScopedString(lowerPathIfInsensitive(path)));
+    if (it != db->name2file_id.end()) {
+      QueryFile &file = db->files[it->second];
+      if (file.def) {
+        ret = &file;
+        if (out_file_id)
+          *out_file_id = it->second;
+        return;
+      }
     }
-  }
-  if (out_file_id)
-    *out_file_id = -1;
+    if (out_file_id)
+      *out_file_id = -1;
+  });
   return ret;
 }
 

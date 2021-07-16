@@ -31,7 +31,7 @@ REFLECT_STRUCT(DocumentHighlight, range, kind, role);
 
 void MessageHandler::textDocument_documentHighlight(
     TextDocumentPositionParam &param, ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     int file_id;
     auto [file, wf] =
         findOrFail(param.textDocument.uri.getPath(), reply, &file_id);
@@ -78,7 +78,7 @@ REFLECT_STRUCT(DocumentLink, range, target);
 
 void MessageHandler::textDocument_documentLink(TextDocumentParam &param,
                                                ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
     if (!wf)
       return;
@@ -137,7 +137,7 @@ template <> bool ignore(const QueryVar::Def *def) {
 
 void MessageHandler::textDocument_documentSymbol(JsonReader &reader,
                                                  ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     DocumentSymbolParam param;
     reflect(reader, param);
 

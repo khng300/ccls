@@ -83,7 +83,7 @@ getHover(DB *db, LanguageId lang, SymbolRef sym, int file_id) {
 
 void MessageHandler::textDocument_hover(TextDocumentPositionParam &param,
                                         ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
     if (!wf)
       return;

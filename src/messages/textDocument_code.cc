@@ -23,7 +23,7 @@ REFLECT_STRUCT(CodeAction, title, kind, edit);
 } // namespace
 void MessageHandler::textDocument_codeAction(CodeActionParam &param,
                                              ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     WorkingFile *wf =
         findOrFail(param.textDocument.uri.getPath(), reply).second;
     if (!wf)
@@ -84,7 +84,7 @@ struct CommonCodeLensParams {
 
 void MessageHandler::textDocument_codeLens(TextDocumentParam &param,
                                            ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
     if (!wf)
       return;
@@ -165,7 +165,7 @@ void MessageHandler::textDocument_codeLens(TextDocumentParam &param,
 
 void MessageHandler::workspace_executeCommand(JsonReader &reader,
                                               ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     Command param;
     reflect(reader, param);
     if (param.arguments.empty()) {

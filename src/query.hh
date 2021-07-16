@@ -3,17 +3,13 @@
 
 #pragma once
 
-#include "db_allocator.hh"
+#include "db_container.hh"
 #include "indexer.hh"
 #include "serializer.hh"
 #include "working_files.hh"
 
-#include <boost/interprocess/containers/string.hpp>
-
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/StringMap.h>
-
-#include <scoped_allocator>
 
 namespace llvm {
 template <> struct DenseMapInfo<ccls::ExtentRef> {
@@ -27,53 +23,6 @@ template <> struct DenseMapInfo<ccls::ExtentRef> {
   static bool isEqual(ccls::ExtentRef l, ccls::ExtentRef r) { return l == r; }
 };
 } // namespace llvm
-
-namespace ccls {
-namespace db {
-//
-// Begin of types
-//
-using Handle = impl::Handle;
-template <typename T> using allocator = impl::allocator<T>;
-template <typename T>
-using scoped_allocator = std::scoped_allocator_adaptor<allocator<T>>;
-template <typename T> allocator<T> getAlloc(Handle handle = {}) {
-  return impl::getAlloc<T>(handle);
-}
-inline allocator<void> getAlloc(Handle handle = {}) {
-  return impl::getAlloc<void>(handle);
-}
-
-template <typename K, typename V>
-using scoped_map =
-    std::map<K, V, std::less<void>,
-             scoped_allocator<typename std::map<K, V>::value_type>>;
-template <typename K, typename V>
-using scoped_unordered_map =
-    std::unordered_map<K, V, std::hash<K>, std::equal_to<K>,
-                       scoped_allocator<typename std::map<K, V>::value_type>>;
-template <typename T> using scoped_vector = std::vector<T, scoped_allocator<T>>;
-using scoped_string =
-    boost::interprocess::basic_string<char, std::char_traits<char>,
-                                      allocator<char>>;
-
-inline std::string toStdString(const scoped_string &s) {
-  return std::string(s.begin(), s.end());
-}
-
-template <typename SV> inline scoped_string toInMemScopedString(SV &&s) {
-  return scoped_string(s.begin(), s.end(), db::getAlloc());
-}
-} // namespace db
-} // namespace ccls
-
-namespace std {
-template <> struct hash<ccls::db::scoped_string> {
-  size_t operator()(const ccls::db::scoped_string &t) const _NOEXCEPT {
-    return boost::container::hash_value(t);
-  }
-};
-} // namespace std
 
 namespace ccls {
 struct QueryFile {
@@ -416,38 +365,32 @@ struct DenseMapInfoForUsr {
 
 using Lid2file_id = std::unordered_map<int, int>;
 
-// The query database is heavily optimized for fast queries. It is stored
-// in-memory.
-struct DB {
-  struct View {
-    db::scoped_map<int, QueryFile> &files;
-    db::scoped_unordered_map<db::scoped_string, int> &name2file_id;
-    db::scoped_map<Usr, std::size_t> &func_usr, &type_usr, &var_usr;
-    db::scoped_map<std::size_t, QueryFunc> &funcs;
-    db::scoped_map<std::size_t, QueryType> &types;
-    db::scoped_map<std::size_t, QueryVar> &vars;
-    db::allocator<DB> &allocator;
+struct DB;
+struct QueryStore {
+  QueryStore(const db::allocator<QueryStore> &alloc, bool priv = false);
 
-    View(DB &db)
-        : files(db.files), name2file_id(db.name2file_id), func_usr(db.func_usr),
-          type_usr(db.type_usr), var_usr(db.var_usr), funcs(db.funcs),
-          types(db.types), vars(db.vars), allocator(db.allocator) {}
-  };
+  void startRead(std::function<void(DB *)> &&fn);
+  void startWrite(std::function<void(DB *)> &&fn);
+
+public:
+  friend std::vector<Use>
+  getFuncDeclarations(DB *db, const db::scoped_vector<Usr> &usrs);
+  friend std::vector<Use> getTypeDeclarations(DB *,
+                                              const db::scoped_vector<Usr> &);
+  friend DocumentUri getLsDocumentUri(DB *db, int file_id, std::string *path);
 
   uint64_t identity;
-  db::scoped_map<int, QueryFile> files;
+  db::QueryVec<QueryFile> files;
   db::scoped_unordered_map<db::scoped_string, int> name2file_id;
-  db::scoped_map<Usr, std::size_t> func_usr, type_usr, var_usr;
-  db::scoped_map<std::size_t, QueryFunc> funcs;
-  db::scoped_map<std::size_t, QueryType> types;
-  db::scoped_map<std::size_t, QueryVar> vars;
-  db::allocator<DB> allocator;
+  db::scoped_unordered_map<Usr, std::size_t> func_usr, type_usr, var_usr;
+  db::QueryVec<QueryFunc> funcs;
+  db::QueryVec<QueryType> types;
+  db::QueryVec<QueryVar> vars;
+  db::allocator<QueryStore> allocator;
+};
 
-  DB(const db::allocator<DB> &alloc);
+struct DB : QueryStore {
   void clear();
-
-  void startRead(std::function<void()> &&fn);
-  void startWrite(std::function<void()> &&fn);
 
   template <typename Def>
   void removeUsrs(Kind kind, int file_id,
@@ -462,8 +405,9 @@ struct DB {
               std::vector<std::pair<Usr, QueryFunc::Def>> &&us);
   void update(const Lid2file_id &, int file_id,
               std::vector<std::pair<Usr, QueryVar::Def>> &&us);
-  std::string_view getSymbolName(SymbolIdx sym, bool qualified);
-  std::vector<uint8_t> getFileSet(const std::vector<std::string> &folders);
+  std::string_view getSymbolName(SymbolIdx sym, bool qualified) const;
+  std::vector<uint8_t>
+  getFileSet(const std::vector<std::string> &folders) const;
 
   bool hasFunc(Usr usr) const { return func_usr.count(usr); }
   bool hasType(Usr usr) const { return type_usr.count(usr); }
@@ -472,11 +416,33 @@ struct DB {
   QueryFunc &getFunc(Usr usr) { return funcs[func_usr[usr]]; }
   QueryType &getType(Usr usr) { return types[type_usr[usr]]; }
   QueryVar &getVar(Usr usr) { return vars[var_usr[usr]]; }
+  const QueryFunc &getFunc(Usr usr) const {
+    auto it = func_usr.find(usr);
+    if (it == func_usr.end())
+      throw std::out_of_range("getFunc() const: not found");
+    return funcs[it->second];
+  }
+  const QueryType &getType(Usr usr) const {
+    auto it = type_usr.find(usr);
+    if (it == type_usr.end())
+      throw std::out_of_range("getType() const: not found");
+    return types[it->second];
+  }
+  const QueryVar &getVar(Usr usr) const {
+    auto it = var_usr.find(usr);
+    if (it == var_usr.end())
+      throw std::out_of_range("getVar() const: not found");
+    return vars[it->second];
+  }
 
   QueryFile &getFile(SymbolIdx ref) { return files[ref.usr]; }
   QueryFunc &getFunc(SymbolIdx ref) { return getFunc(ref.usr); }
   QueryType &getType(SymbolIdx ref) { return getType(ref.usr); }
   QueryVar &getVar(SymbolIdx ref) { return getVar(ref.usr); }
+  const QueryFile &getFile(SymbolIdx ref) const { return files[ref.usr]; }
+  const QueryFunc &getFunc(SymbolIdx ref) const { return getFunc(ref.usr); }
+  const QueryType &getType(SymbolIdx ref) const { return getType(ref.usr); }
+  const QueryVar &getVar(SymbolIdx ref) const { return getVar(ref.usr); }
 };
 
 Maybe<DeclRef> getDefinitionSpell(DB *db, SymbolIdx sym);
@@ -484,7 +450,6 @@ Maybe<DeclRef> getDefinitionSpell(DB *db, SymbolIdx sym);
 // Get defining declaration (if exists) or an arbitrary declaration (otherwise)
 // for each id.
 std::vector<Use> getFuncDeclarations(DB *, const db::scoped_vector<Usr> &);
-std::vector<Use> getFuncDeclarations(DB *, const Vec<Usr> &);
 std::vector<Use> getTypeDeclarations(DB *, const db::scoped_vector<Usr> &);
 std::vector<DeclRef> getVarDeclarations(DB *, const db::scoped_vector<Usr> &,
                                         unsigned);
@@ -497,7 +462,6 @@ std::vector<Use> getUsesForAllDerived(DB *db, QueryFunc &root);
 std::optional<lsRange> getLsRange(WorkingFile *working_file,
                                   const Range &location);
 DocumentUri getLsDocumentUri(DB *db, int file_id, std::string *path);
-DocumentUri getLsDocumentUri(DB *db, int file_id);
 
 std::optional<Location> getLsLocation(DB *db, WorkingFiles *wfiles, Use use);
 std::optional<Location> getLsLocation(DB *db, WorkingFiles *wfiles,
@@ -505,14 +469,15 @@ std::optional<Location> getLsLocation(DB *db, WorkingFiles *wfiles,
 LocationLink getLocationLink(DB *db, WorkingFiles *wfiles, DeclRef dr);
 
 // Returns a symbol. The symbol will *NOT* have a location assigned.
-std::optional<SymbolInformation> getSymbolInfo(DB *db, SymbolIdx sym,
+std::optional<SymbolInformation> getSymbolInfo(const DB *db, SymbolIdx sym,
                                                bool detailed);
 
 std::vector<SymbolRef> findSymbolsAtLocation(WorkingFile *working_file,
                                              QueryFile *file, Position &ls_pos,
                                              bool smallest = false);
 
-template <typename Fn> void withEntity(DB *db, SymbolIdx sym, Fn &&fn) {
+template <typename DBT, typename Fn>
+void withEntity(DBT *db, SymbolIdx sym, Fn &&fn) {
   switch (sym.kind) {
   case Kind::Invalid:
   case Kind::File:
@@ -529,7 +494,8 @@ template <typename Fn> void withEntity(DB *db, SymbolIdx sym, Fn &&fn) {
   }
 }
 
-template <typename Fn> void eachEntityDef(DB *db, SymbolIdx sym, Fn &&fn) {
+template <typename DBT, typename Fn>
+void eachEntityDef(DBT *db, SymbolIdx sym, Fn &&fn) {
   withEntity(db, sym, [&](const auto &entity) {
     for (auto &def : entity.def)
       if (!fn(def))
@@ -537,8 +503,8 @@ template <typename Fn> void eachEntityDef(DB *db, SymbolIdx sym, Fn &&fn) {
   });
 }
 
-template <typename Fn>
-void eachOccurrence(DB *db, SymbolIdx sym, bool include_decl, Fn &&fn) {
+template <typename DBT, typename Fn>
+void eachOccurrence(DBT *db, SymbolIdx sym, bool include_decl, Fn &&fn) {
   withEntity(db, sym, [&](const auto &entity) {
     for (Use use : entity.uses)
       fn(use);
@@ -554,8 +520,8 @@ void eachOccurrence(DB *db, SymbolIdx sym, bool include_decl, Fn &&fn) {
 
 SymbolKind getSymbolKind(DB *db, SymbolIdx sym);
 
-template <typename C, typename Fn>
-void eachDefinedFunc(DB *db, const C &usrs, Fn &&fn) {
+template <typename DBT, typename C, typename Fn>
+void eachDefinedFunc(DBT *db, const C &usrs, Fn &&fn) {
   for (Usr usr : usrs) {
     auto &obj = db->getFunc(usr);
     if (!obj.def.empty())

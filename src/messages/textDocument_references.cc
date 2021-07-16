@@ -35,7 +35,7 @@ REFLECT_STRUCT(ReferenceParam, textDocument, position, context, folders, base,
 
 void MessageHandler::textDocument_references(JsonReader &reader,
                                              ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     ReferenceParam param;
     reflect(reader, param);
     auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
@@ -107,7 +107,7 @@ void MessageHandler::textDocument_references(JsonReader &reader,
           break;
         }
       if (path.size())
-        for (auto &[_, file1] : db->files)
+        for (auto &file1 : db->files)
           if (file1.def)
             for (const QueryFile::Def::IndexInclude &include :
                  file1.def->includes)

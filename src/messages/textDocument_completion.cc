@@ -491,7 +491,7 @@ public:
 
 void MessageHandler::textDocument_completion(CompletionParam &param,
                                              ReplyOnce &reply) {
-  db->startWrite([&]() {
+  db->startWrite([&](DB *db) {
     static CompleteConsumerCache<std::vector<CompletionItem>> cache;
     std::string path = param.textDocument.uri.getPath();
     WorkingFile *wf = wfiles->getFile(path);

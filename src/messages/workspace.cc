@@ -145,7 +145,7 @@ bool addSymbol(
 
 void MessageHandler::workspace_symbol(WorkspaceSymbolParam &param,
                                       ReplyOnce &reply) {
-  db->startRead([&]() {
+  db->startRead([&](DB *db) {
     std::vector<SymbolInformation> result;
     const std::string &query = param.query;
     for (auto &folder : param.folders)
@@ -173,13 +173,13 @@ void MessageHandler::workspace_symbol(WorkspaceSymbolParam &param,
                        &cands) &&
              cands.size() >= g_config->workspaceSymbol.maxNum;
     };
-    for (auto &[_, func] : db->funcs)
+    for (auto &func : db->funcs)
       if (add({func.usr, Kind::Func}))
         goto done_add;
-    for (auto &[_, type] : db->types)
+    for (auto &type : db->types)
       if (add({type.usr, Kind::Type}))
         goto done_add;
-    for (auto &[_, var] : db->vars)
+    for (auto &var : db->vars)
       if (var.def.size() && !var.def[0].is_local() && add({var.usr, Kind::Var}))
         goto done_add;
   done_add:
