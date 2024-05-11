@@ -129,27 +129,17 @@ public:
   bool operator!=(const Maybe &o) const { return !(*this == o); }
 };
 
-template <typename T> struct Vec {
-  std::unique_ptr<T[]> a;
-  int s = 0;
-#if !(__clang__ || __GNUC__ > 7 || __GNUC__ == 7 && __GNUC_MINOR__ >= 4) ||    \
-    defined(_WIN32)
-  // Work around a bug in GCC<7.4 that optional<IndexUpdate> would not be
-  // construtible.
-  Vec() = default;
-  Vec(const Vec &o) : a(std::make_unique<T[]>(o.s)), s(o.s) {
-    std::copy(o.a.get(), o.a.get() + o.s, a.get());
-  }
-  Vec(Vec &&) = default;
-  Vec &operator=(Vec &&) = default;
-  Vec(std::unique_ptr<T[]> a, int s) : a(std::move(a)), s(s) {}
-#endif
-  const T *begin() const { return a.get(); }
-  T *begin() { return a.get(); }
-  const T *end() const { return a.get() + s; }
-  T *end() { return a.get() + s; }
-  int size() const { return s; }
-  const T &operator[](size_t i) const { return a.get()[i]; }
-  T &operator[](size_t i) { return a.get()[i]; }
+template <typename Type, typename = void> struct is_iterable {
+  static constexpr bool value = false;
 };
+template <typename Type>
+struct is_iterable<Type,
+                   std::void_t<decltype(std::begin(std::declval<Type>()) &&
+                                        std::end(std::declval<Type>()))>> {
+  static constexpr bool value = true;
+};
+template <typename Type>
+constexpr bool is_iterable_v =
+    is_iterable<std::remove_reference_t<Type>>::value;
+
 } // namespace ccls

@@ -54,8 +54,8 @@ void threadLeave();
 void init();
 void launchStdin();
 void launchStdout();
-void indexer_Main(SemaManager *manager, VFS *vfs, Project *project,
-                  WorkingFiles *wfiles);
+void indexer_Main(SemaManager *manager, VFS *vfs, QSConnection qs,
+                  Project *project, WorkingFiles *wfiles);
 void mainLoop();
 void standalone(const std::string &root);
 

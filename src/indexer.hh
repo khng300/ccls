@@ -129,16 +129,27 @@ void reflect(BinaryWriter &visitor, DeclRef &value);
 
 template <typename T> using VectorAdapter = std::vector<T, std::allocator<T>>;
 
+struct DB;
 template <typename D> struct NameMixin {
   std::string_view name(bool qualified) const {
     auto self = static_cast<const D *>(this);
     return qualified
-               ? std::string_view(self->detailed_name + self->qual_name_offset,
-                                  self->short_name_offset -
-                                      self->qual_name_offset +
-                                      self->short_name_size)
-               : std::string_view(self->detailed_name + self->short_name_offset,
-                                  self->short_name_size);
+               ? std::string_view(self->detailed_name)
+                     .substr(self->qual_name_offset,
+                             self->short_name_offset - self->qual_name_offset +
+                                 self->short_name_size)
+               : std::string_view(self->detailed_name)
+                     .substr(self->short_name_offset, self->short_name_size);
+  }
+  template <typename DB> std::string_view name(DB *db, bool qualified) const {
+    auto self = static_cast<const D *>(this);
+    return qualified
+               ? self->detailed_name.get(db).substr(self->qual_name_offset,
+                                                    self->short_name_offset -
+                                                        self->qual_name_offset +
+                                                        self->short_name_size)
+               : self->detailed_name.get(db).substr(self->short_name_offset,
+                                                    self->short_name_size);
   }
 };
 
@@ -330,7 +341,9 @@ struct IndexResult {
 
 struct SemaManager;
 struct WorkingFiles;
+struct QueryStore;
 struct VFS;
+using QSConnection = std::shared_ptr<QueryStore>;
 
 namespace idx {
 void init();

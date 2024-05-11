@@ -136,7 +136,7 @@ bool cacheInvalid(VFS *vfs, IndexFile *prev, const std::string &path,
              << (changed < prev->args.size() ? prev->args[changed] : "")
              << "; new: " << (changed < size ? args[changed] : "");
   return changed >= 0;
-};
+}
 
 std::string appendSerializationFormat(const std::string &base) {
   switch (g_config->cache.format) {
@@ -197,7 +197,8 @@ std::mutex &getFileMutex(const std::string &path) {
 }
 
 bool indexer_Parse(SemaManager *completion, WorkingFiles *wfiles,
-                   Project *project, VFS *vfs, const GroupMatch &matcher) {
+                   Project *project, VFS *vfs, QSConnection qs,
+                   const GroupMatch &matcher) {
   std::optional<IndexRequest> opt_request = index_request->tryPopFront();
   if (!opt_request)
     return false;
@@ -479,44 +480,61 @@ void init() {
   for_stdout = new ThreadedQueue<std::string>(stdout_waiter);
 }
 
-void indexer_Main(SemaManager *manager, VFS *vfs, Project *project,
-                  WorkingFiles *wfiles) {
+void indexer_Main(SemaManager *manager, VFS *vfs, QSConnection qs,
+                  Project *project, WorkingFiles *wfiles) {
   GroupMatch matcher(g_config->index.whitelist, g_config->index.blacklist);
   while (true)
-    if (!indexer_Parse(manager, wfiles, project, vfs, matcher))
+    if (!indexer_Parse(manager, wfiles, project, vfs, qs, matcher))
       if (indexer_waiter->wait(g_quit, index_request))
         break;
 }
 
-void main_OnIndexed(DB *db, WorkingFiles *wfiles, IndexUpdate *update) {
+void main_OnIndexed(QSConnection qs, WorkingFiles *wfiles,
+                    IndexUpdate *update) {
   if (update->refresh) {
+    auto txn = TxnDB::begin(qs, true);
+    auto db = txn.db();
     LOG_S(INFO)
         << "loaded project. Refresh semantic highlight for all working file.";
     std::lock_guard lock(wfiles->mutex);
     for (auto &[f, wf] : wfiles->files) {
-      std::string path = lowerPathIfInsensitive(f);
-      if (db->name2file_id.find(path) == db->name2file_id.end())
+      auto id = db->findFileId(f);
+      if (!id)
         continue;
-      QueryFile &file = db->files[db->name2file_id[path]];
+      auto file = db->getFile(*id);
       emitSemanticHighlight(db, wf.get(), file);
     }
     return;
   }
 
-  db->applyIndexUpdate(update);
+  IndexUpdate _update = *update;
+redo_txn:
+  try {
+    auto txn = TxnDB::begin(qs, false);
+    auto db = txn.db();
+    db->applyIndexUpdate(update);
 
-  // Update indexed content, skipped ranges, and semantic highlighting.
-  if (update->files_def_update) {
-    auto &def_u = *update->files_def_update;
-    if (WorkingFile *wfile = wfiles->getFile(def_u.first.path)) {
-      // FIXME With index.onChange: true, use buffer_content only for
-      // request.path
-      wfile->setIndexContent(g_config->index.onChange ? wfile->buffer_content
-                                                      : def_u.second);
-      QueryFile &file = db->files[update->file_id];
-      emitSkippedRanges(wfile, file);
-      emitSemanticHighlight(db, wfile, file);
+    // Update indexed content, skipped ranges, and semantic highlighting.
+    if (update->files_def_update) {
+      auto &def_u = *update->files_def_update;
+      if (WorkingFile *wfile = wfiles->getFile(def_u.first.path)) {
+        // FIXME With index.onChange: true, use buffer_content only for
+        // request.path
+        wfile->setIndexContent(g_config->index.onChange ? wfile->buffer_content
+                                                        : def_u.second);
+        auto file = db->getFile(update->file_id);
+        emitSkippedRanges(wfile, file);
+        emitSemanticHighlight(db, wfile, file);
+      }
     }
+    txn.commit();
+  } catch (const lmdb::map_full_error &) {
+    qs->increaseMapSize();
+    *update = _update;
+    goto redo_txn;
+  } catch (const lmdb::error &e) {
+    LOG_S(ERROR) << "lmdb error: " << e.what();
+    throw;
   }
 }
 
@@ -621,6 +639,7 @@ void mainLoop() {
   Project project;
   WorkingFiles wfiles;
   VFS vfs;
+  QSConnection in_memory_qs = std::make_shared<QueryStore>();
 
   SemaManager manager(
       &project, &wfiles,
@@ -640,13 +659,12 @@ void mainLoop() {
       });
 
   IncludeComplete include_complete(&project);
-  DB db;
 
   // Setup shared references.
   MessageHandler handler;
-  handler.db = &db;
-  handler.project = &project;
+  handler.qs = in_memory_qs;
   handler.vfs = &vfs;
+  handler.project = &project;
   handler.wfiles = &wfiles;
   handler.manager = &manager;
   handler.include_complete = &include_complete;
@@ -690,7 +708,7 @@ void mainLoop() {
         break;
       did_work = true;
       indexed = true;
-      main_OnIndexed(&db, &wfiles, &*update);
+      main_OnIndexed(handler.qs, &wfiles, &*update);
       if (update->files_def_update) {
         auto it = path2backlog.find(update->files_def_update->first.path);
         if (it != path2backlog.end()) {

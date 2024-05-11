@@ -35,9 +35,11 @@ REFLECT_STRUCT(ReferenceParam, textDocument, position, context, folders, base,
 
 void MessageHandler::textDocument_references(JsonReader &reader,
                                              ReplyOnce &reply) {
+  auto txn = TxnDB::begin(qs, true);
+  auto db = txn.db();
   ReferenceParam param;
   reflect(reader, param);
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+  auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply);
   if (!wf)
     return;
 
@@ -49,7 +51,7 @@ void MessageHandler::textDocument_references(JsonReader &reader,
   std::unordered_set<Use> seen_uses;
   int line = param.position.line;
 
-  for (SymbolRef sym : findSymbolsAtLocation(wf, file, param.position)) {
+  for (SymbolRef sym : findSymbolsAtLocation(wf, &*file, param.position)) {
     // Found symbol. Return references.
     std::unordered_set<Usr> seen;
     seen.insert(sym.usr);
@@ -68,25 +70,33 @@ void MessageHandler::textDocument_references(JsonReader &reader,
       };
       withEntity(db, sym, [&](const auto &entity) {
         SymbolKind parent_kind = SymbolKind::Unknown;
-        for (auto &def : entity.def)
+        allOf(entity.defCursor(*db), [&](const auto &def) {
           if (def.spell) {
             parent_kind = getSymbolKind(db, sym);
             if (param.base)
-              for (Usr usr : make_range(def.bases_begin(), def.bases_end()))
+              for (Usr usr : def.bases.get(db))
                 if (!seen.count(usr)) {
                   seen.insert(usr);
                   stack.push_back(usr);
                 }
-            break;
+            return false;
           }
-        for (Use use : entity.uses)
+          return true;
+        });
+        allOf(entity.useCursor(*db), [&](auto use) {
           fn(use, parent_kind);
+          return true;
+        });
         if (param.context.includeDeclaration) {
-          for (auto &def : entity.def)
+          allOf(entity.defCursor(*db), [&](const auto &def) {
             if (def.spell)
               fn(*def.spell, parent_kind);
-          for (Use use : entity.declarations)
-            fn(use, parent_kind);
+            return true;
+          });
+          allOf(entity.declCursor(*db), [&](auto dr) {
+            fn(dr, parent_kind);
+            return true;
+          });
         }
       });
     }
@@ -100,15 +110,16 @@ void MessageHandler::textDocument_references(JsonReader &reader,
     std::string path;
     if (line == 0 || line >= (int)wf->buffer_lines.size() - 1)
       path = file->def->path;
-    for (const IndexInclude &include : file->def->includes)
+    for (const QueryFile::Def::IndexInclude &include : file->def->includes)
       if (include.line == param.position.line) {
         path = include.resolved_path;
         break;
       }
-    if (path.size())
-      for (QueryFile &file1 : db->files)
+    if (path.size()) {
+      db->foreachFile([&](const QueryFile &file1) {
         if (file1.def)
-          for (const IndexInclude &include : file1.def->includes)
+          for (const QueryFile::Def::IndexInclude &include :
+               file1.def->includes)
             if (include.resolved_path == path) {
               // Another file |file1| has the same include line.
               Location &loc = result.emplace_back();
@@ -116,6 +127,9 @@ void MessageHandler::textDocument_references(JsonReader &reader,
               loc.range.start.line = loc.range.end.line = include.line;
               break;
             }
+        return true;
+      });
+    }
   }
 
   if ((int)result.size() >= g_config->xref.maxNum)

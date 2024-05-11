@@ -17,29 +17,33 @@ REFLECT_STRUCT(Param, textDocument, position, kind);
 } // namespace
 
 void MessageHandler::ccls_vars(JsonReader &reader, ReplyOnce &reply) {
+  auto txn = TxnDB::begin(qs, true);
+  auto db = txn.db();
   Param param;
   reflect(reader, param);
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+  auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply);
   if (!wf) {
     return;
   }
 
   std::vector<Location> result;
-  for (SymbolRef sym : findSymbolsAtLocation(wf, file, param.position)) {
+  for (SymbolRef sym : findSymbolsAtLocation(wf, &*file, param.position)) {
     Usr usr = sym.usr;
     switch (sym.kind) {
     default:
       break;
     case Kind::Var: {
-      const QueryVar::Def *def = db->getVar(sym).anyDef();
+      const QueryVar &var = db->getVar(sym);
+      auto def = db->entityGetAnyDef(var);
       if (!def || !def->type)
         continue;
       usr = def->type;
       [[fallthrough]];
     }
     case Kind::Type: {
+      const QueryType &type = db->getType(usr);
       for (DeclRef dr :
-           getVarDeclarations(db, db->getType(usr).instances, param.kind))
+           getVarDeclarations(db, type.instanceCursor(*db), param.kind))
         if (auto loc = getLocationLink(db, wfiles, dr))
           result.push_back(Location(std::move(loc)));
       break;

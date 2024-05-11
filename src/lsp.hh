@@ -177,10 +177,10 @@ enum class SymbolKind : uint8_t {
 };
 
 struct SymbolInformation {
-  std::string_view name;
+  std::string name;
   SymbolKind kind;
   Location location;
-  std::optional<std::string_view> containerName;
+  std::optional<std::string> containerName;
 };
 
 struct TextDocumentIdentifier {

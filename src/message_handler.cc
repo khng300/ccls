@@ -52,7 +52,7 @@ REFLECT_STRUCT(WorkspaceSymbolParam, query, folders);
 
 namespace {
 struct CclsSemanticHighlightSymbol {
-  int id = 0;
+  uint64_t id{0};
   SymbolKind parentKind;
   SymbolKind kind;
   uint8_t storage;
@@ -237,42 +237,41 @@ void MessageHandler::run(InMessage &msg) {
   }
 }
 
-QueryFile *MessageHandler::findFile(const std::string &path, int *out_file_id) {
-  QueryFile *ret = nullptr;
-  auto it = db->name2file_id.find(lowerPathIfInsensitive(path));
-  if (it != db->name2file_id.end()) {
-    QueryFile &file = db->files[it->second];
+std::optional<QueryFile>
+MessageHandler::findFile(DB *db, const std::string &path, int *out_file_id) {
+  auto id = db->findFileId(path);
+  if (id) {
+    QueryFile file = db->getFile(*id);
     if (file.def) {
-      ret = &file;
       if (out_file_id)
-        *out_file_id = it->second;
-      return ret;
+        *out_file_id = *id;
+      return file;
     }
   }
   if (out_file_id)
     *out_file_id = -1;
-  return ret;
+  return {};
 }
 
-std::pair<QueryFile *, WorkingFile *>
-MessageHandler::findOrFail(const std::string &path, ReplyOnce &reply,
+std::pair<std::optional<QueryFile>, WorkingFile *>
+MessageHandler::findOrFail(DB *db, const std::string &path, ReplyOnce &reply,
                            int *out_file_id, bool allow_unopened) {
   WorkingFile *wf = wfiles->getFile(path);
   if (!wf && !allow_unopened) {
     reply.notOpened(path);
-    return {nullptr, nullptr};
+    return {std::nullopt, nullptr};
   }
-  QueryFile *file = findFile(path, out_file_id);
+  auto file = findFile(db, path, out_file_id);
   if (!file) {
     if (!overdue)
       throw NotIndexed{path};
     reply.error(ErrorCode::InvalidRequest, "not indexed");
-    return {nullptr, nullptr};
+    return {std::nullopt, nullptr};
   }
-  return {file, wf};
+  return {*file, wf};
 }
 
-void emitSkippedRanges(WorkingFile *wfile, QueryFile &file) {
+void emitSkippedRanges(WorkingFile *wfile, const QueryFile &file) {
   CclsSetSkippedRanges params;
   params.uri = DocumentUri::fromPath(wfile->filename);
   for (Range skipped : file.def->skipped_ranges)
@@ -281,7 +280,7 @@ void emitSkippedRanges(WorkingFile *wfile, QueryFile &file) {
   pipeline::notify("$ccls/publishSkippedRanges", params);
 }
 
-void emitSemanticHighlight(DB *db, WorkingFile *wfile, QueryFile &file) {
+void emitSemanticHighlight(DB *db, WorkingFile *wfile, const QueryFile &file) {
   static GroupMatch match(g_config->highlight.whitelist,
                           g_config->highlight.blacklist);
   assert(file.def);
@@ -291,25 +290,26 @@ void emitSemanticHighlight(DB *db, WorkingFile *wfile, QueryFile &file) {
 
   // Group symbols together.
   std::unordered_map<SymbolIdx, CclsSemanticHighlightSymbol> grouped_symbols;
-  for (auto [sym, refcnt] : file.symbol2refcnt) {
+  for (auto [sym_, refcnt] : file.symbol2refcnt) {
+    std::remove_cv<decltype(sym_)>::type sym = sym_;
     if (refcnt <= 0)
       continue;
     std::string_view detailed_name;
     SymbolKind parent_kind = SymbolKind::Unknown;
     SymbolKind kind = SymbolKind::Unknown;
     uint8_t storage = SC_None;
-    int idx;
-    // This switch statement also filters out symbols that are not highlighted.
+    uint64_t usr = -1ull;
+    // This switch statement also filters out symbols that are not
+    // highlighted.
     switch (sym.kind) {
     case Kind::Func: {
-      idx = db->func_usr[sym.usr];
-      const QueryFunc &func = db->funcs[idx];
-      const QueryFunc::Def *def = func.anyDef();
+      auto func = db->getFunc(sym.usr);
+      auto def = db->entityGetAnyDef(func);
       if (!def)
         continue; // applies to for loop
       // Don't highlight overloadable operators or implicit lambda ->
       // std::function constructor.
-      std::string_view short_name = def->name(false);
+      std::string_view short_name = def->name(db, false);
       if (short_name.compare(0, 8, "operator") == 0)
         continue; // applies to for loop
       kind = def->kind;
@@ -336,30 +336,30 @@ void emitSemanticHighlight(DB *db, WorkingFile *wfile, QueryFile &file) {
       break;
     }
     case Kind::Type: {
-      idx = db->type_usr[sym.usr];
-      const QueryType &type = db->types[idx];
-      for (auto &def : type.def) {
+      auto type = db->getType(sym.usr);
+      allOf(type.defCursor(*db), [&](const auto &def) {
         kind = def.kind;
-        detailed_name = def.detailed_name;
+        detailed_name = def.detailed_name.get(db);
         if (def.spell) {
           parent_kind = def.parent_kind;
-          break;
+          return false;
         }
-      }
+        return true;
+      });
       break;
     }
     case Kind::Var: {
-      idx = db->var_usr[sym.usr];
-      const QueryVar &var = db->vars[idx];
-      for (auto &def : var.def) {
+      auto var = db->getVar(sym.usr);
+      allOf(var.defCursor(*db), [&](const auto &def) {
         kind = def.kind;
         storage = def.storage;
-        detailed_name = def.detailed_name;
+        detailed_name = def.detailed_name.get(db);
         if (def.spell) {
           parent_kind = def.parent_kind;
-          break;
+          return false;
         }
-      }
+        return true;
+      });
       break;
     }
     default:
@@ -372,7 +372,7 @@ void emitSemanticHighlight(DB *db, WorkingFile *wfile, QueryFile &file) {
         it->second.lsRanges.push_back(*loc);
       } else {
         CclsSemanticHighlightSymbol symbol;
-        symbol.id = idx;
+        symbol.id = usr;
         symbol.parentKind = parent_kind;
         symbol.kind = kind;
         symbol.storage = storage;
@@ -410,7 +410,8 @@ void emitSemanticHighlight(DB *db, WorkingFile *wfile, QueryFile &file) {
     // the ealier. The order of [a0, b) [a1, b) does not matter.
     // The order of [a, b) [b, c) does not as long as we do not emit empty
     // ranges.
-    // Attribute range [events[i-1].pos, events[i].pos) to events[top-1].symbol
+    // Attribute range [events[i-1].pos, events[i].pos) to
+    // events[top-1].symbol
     // .
     if (top && !(events[i - 1].pos == events[i].pos))
       events[top - 1].symbol->lsRanges.push_back(

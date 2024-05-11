@@ -19,7 +19,10 @@ REFLECT_STRUCT(FoldingRange, startLine, startCharacter, endLine, endCharacter,
 
 void MessageHandler::textDocument_foldingRange(TextDocumentParam &param,
                                                ReplyOnce &reply) {
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+  auto txn = TxnDB::begin(qs, true);
+  auto db = txn.db();
+  auto [file, wf] =
+      findOrFail(db, param.textDocument.uri.getPath(), reply);
   if (!wf)
     return;
   std::vector<FoldingRange> result;
