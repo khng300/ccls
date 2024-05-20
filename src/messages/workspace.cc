@@ -116,15 +116,17 @@ bool addSymbol(
   Maybe<DeclRef> dr;
   bool in_folder = false;
   withEntity(db, sym, [&](const auto &entity) {
-    for (auto &def : entity.def)
+    allOf(entity.defCursor(*db), [&](const auto &def) {
       if (def.spell) {
         dr = def.spell;
         if (!in_folder && (in_folder = file_set[def.spell->file_id]))
-          break;
+          return false;
       }
+      return true;
+    });
   });
   if (!dr) {
-    auto &decls = getNonDefDeclarations(db, sym);
+    auto decls = getNonDefDeclarations(db, sym);
     for (auto &dr1 : decls) {
       dr = dr1;
       if (!in_folder && (in_folder = file_set[dr1.file_id]))
@@ -145,6 +147,8 @@ bool addSymbol(
 
 void MessageHandler::workspace_symbol(WorkspaceSymbolParam &param,
                                       ReplyOnce &reply) {
+  auto txn = TxnDB::begin(qs, true);
+  auto db = txn.db();
   std::vector<SymbolInformation> result;
   const std::string &query = param.query;
   for (auto &folder : param.folders)
@@ -163,7 +167,7 @@ void MessageHandler::workspace_symbol(WorkspaceSymbolParam &param,
       query_without_space += c;
 
   auto add = [&](SymbolIdx sym) {
-    std::string_view detailed_name = db->getSymbolName(sym, true);
+    std::string detailed_name = db->getSymbolName(sym, true);
     int pos = reverseSubseqMatch(query_without_space, detailed_name, sensitive);
     return pos >= 0 &&
            addSymbol(db, wfiles, file_set, sym,
@@ -171,15 +175,31 @@ void MessageHandler::workspace_symbol(WorkspaceSymbolParam &param,
                      &cands) &&
            cands.size() >= g_config->workspaceSymbol.maxNum;
   };
-  for (auto &func : db->funcs)
-    if (add({func.usr, Kind::Func}))
-      goto done_add;
-  for (auto &type : db->types)
-    if (add({type.usr, Kind::Type}))
-      goto done_add;
-  for (auto &var : db->vars)
-    if (var.def.size() && !var.def[0].is_local() && add({var.usr, Kind::Var}))
-      goto done_add;
+
+  if (!db->allOfUsr(Kind::Func, [&](const auto id) {
+        const auto &func = db->id2Func(id);
+        if (add({func.usr, Kind::Func}))
+          return false;
+        return true;
+      })) {
+    goto done_add;
+  }
+  if (!db->allOfUsr(Kind::Type, [&](const auto id) {
+        const auto &type = db->id2Type(id);
+        if (add({type.usr, Kind::Type}))
+          return false;
+        return true;
+      })) {
+    goto done_add;
+  }
+  if (!db->allOfUsr(Kind::Var, [&](const auto id) {
+        const auto &var = db->id2Type(id);
+        if (add({var.usr, Kind::Var}))
+          return false;
+        return true;
+      })) {
+    goto done_add;
+  }
 done_add:
 
   if (g_config->workspaceSymbol.sort && query.size() <= FuzzyMatcher::kMaxPat) {

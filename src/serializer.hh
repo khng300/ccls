@@ -7,6 +7,7 @@
 
 #include <llvm/Support/Compiler.h>
 
+#include <cista/containers.h>
 #include <macro_map.h>
 #include <rapidjson/fwd.h>
 
@@ -182,6 +183,7 @@ void reflect(JsonReader &vis, unsigned long long &v);
 void reflect(JsonReader &vis, double &v);
 void reflect(JsonReader &vis, const char *&v);
 void reflect(JsonReader &vis, std::string &v);
+void reflect(JsonReader &vis, cista::offset::cstring &v);
 
 void reflect(JsonWriter &vis, bool &v);
 void reflect(JsonWriter &vis, unsigned char &v);
@@ -196,6 +198,7 @@ void reflect(JsonWriter &vis, unsigned long long &v);
 void reflect(JsonWriter &vis, double &v);
 void reflect(JsonWriter &vis, const char *&v);
 void reflect(JsonWriter &vis, std::string &v);
+void reflect(JsonWriter &vis, cista::offset::cstring &v);
 
 void reflect(BinaryReader &vis, bool &v);
 void reflect(BinaryReader &vis, unsigned char &v);
@@ -210,6 +213,7 @@ void reflect(BinaryReader &vis, unsigned long long &v);
 void reflect(BinaryReader &vis, double &v);
 void reflect(BinaryReader &vis, const char *&v);
 void reflect(BinaryReader &vis, std::string &v);
+void reflect(BinaryReader &vis, cista::offset::cstring &v);
 
 void reflect(BinaryWriter &vis, bool &v);
 void reflect(BinaryWriter &vis, unsigned char &v);
@@ -224,6 +228,7 @@ void reflect(BinaryWriter &vis, unsigned long long &v);
 void reflect(BinaryWriter &vis, double &v);
 void reflect(BinaryWriter &vis, const char *&v);
 void reflect(BinaryWriter &vis, std::string &v);
+void reflect(BinaryWriter &vis, cista::offset::cstring &v);
 
 void reflect(JsonReader &vis, JsonNull &v);
 void reflect(JsonWriter &vis, JsonNull &v);
@@ -283,6 +288,34 @@ template <typename T> void reflect(BinaryReader &vis, Maybe<T> &v) {
 }
 template <typename T> void reflect(BinaryWriter &vis, Maybe<T> &v) {
   if (v) {
+    vis.pack<unsigned char>(1);
+    reflect(vis, *v);
+  } else {
+    vis.pack<unsigned char>(0);
+  }
+}
+
+// The same as std::optional
+template <typename T> void reflect(JsonReader &vis, cista::optional<T> &v) {
+  if (!vis.isNull()) {
+    v.emplace();
+    reflect(vis, *v);
+  }
+}
+template <typename T> void reflect(JsonWriter &vis, cista::optional<T> &v) {
+  if (v)
+    reflect(vis, *v);
+  else
+    vis.null_();
+}
+template <typename T> void reflect(BinaryReader &vis, cista::optional<T> &v) {
+  if (*vis.p_++) {
+    v = T{};
+    reflect(vis, *v);
+  }
+}
+template <typename T> void reflect(BinaryWriter &vis, cista::optional<T> &v) {
+  if (v.has_value()) {
     vis.pack<unsigned char>(1);
     reflect(vis, *v);
   } else {
@@ -361,6 +394,35 @@ template <typename T> void reflect(BinaryReader &vis, std::vector<T> &v) {
   }
 }
 template <typename T> void reflect(BinaryWriter &vis, std::vector<T> &v) {
+  vis.varUInt(v.size());
+  for (auto &it : v)
+    reflect(vis, it);
+}
+
+// cista::offset::vector
+template <typename T>
+void reflect(JsonReader &vis, cista::offset::vector<T> &v) {
+  vis.iterArray([&]() {
+    v.emplace_back();
+    reflect(vis, v.back());
+  });
+}
+template <typename T>
+void reflect(JsonWriter &vis, cista::offset::vector<T> &v) {
+  vis.startArray();
+  for (auto &it : v)
+    reflect(vis, it);
+  vis.endArray();
+}
+template <typename T>
+void reflect(BinaryReader &vis, cista::offset::vector<T> &v) {
+  for (auto n = vis.varUInt(); n; n--) {
+    v.emplace_back();
+    reflect(vis, v.back());
+  }
+}
+template <typename T>
+void reflect(BinaryWriter &vis, cista::offset::vector<T> &v) {
   vis.varUInt(v.size());
   for (auto &it : v)
     reflect(vis, it);

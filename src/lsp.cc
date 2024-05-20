@@ -41,13 +41,13 @@ void reflect(JsonWriter &visitor, RequestId &value) {
   }
 }
 
-DocumentUri DocumentUri::fromPath(const std::string &path) {
+DocumentUri DocumentUri::fromPath(std::string_view path) {
   DocumentUri result;
   result.setPath(path);
   return result;
 }
 
-void DocumentUri::setPath(const std::string &path) {
+void DocumentUri::setPath(std::string_view path) {
   // file:///c%3A/Users/jacob/Desktop/superindex/indexer/full_tests
   raw_uri = path;
 
