@@ -90,6 +90,10 @@ struct ExtentRef : SymbolRef {
     return std::make_tuple(range, usr, kind, role, extent);
   }
   bool operator==(const ExtentRef &o) const { return toTuple() == o.toTuple(); }
+
+  auto cista_members() {
+    return std::tie(static_cast<SymbolRef &>(*this), extent);
+  }
 };
 
 struct Ref {
@@ -134,16 +138,17 @@ void reflect(BinaryWriter &visitor, DeclRef &value);
 
 template <typename T> using VectorAdapter = std::vector<T, std::allocator<T>>;
 
+struct DB;
 template <typename D> struct NameMixin {
   std::string_view name(bool qualified) const {
     auto self = static_cast<const D *>(this);
     return qualified
-               ? std::string_view(self->detailed_name + self->qual_name_offset,
-                                  self->short_name_offset -
-                                      self->qual_name_offset +
-                                      self->short_name_size)
-               : std::string_view(self->detailed_name + self->short_name_offset,
-                                  self->short_name_size);
+               ? std::string_view(self->detailed_name)
+                     .substr(self->qual_name_offset,
+                             self->short_name_offset - self->qual_name_offset +
+                                 self->short_name_size)
+               : std::string_view(self->detailed_name)
+                     .substr(self->short_name_offset, self->short_name_size);
   }
 };
 
@@ -335,7 +340,9 @@ struct IndexResult {
 
 struct SemaManager;
 struct WorkingFiles;
+struct QueryStore;
 struct VFS;
+using QueryStoreConnection = std::shared_ptr<QueryStore>;
 
 namespace idx {
 void init();

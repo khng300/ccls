@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "query.hh"
-
-#include "indexer.hh"
+#include "log.hh"
 #include "pipeline.hh"
-#include "serializer.hh"
+
+#include <llvm/ADT/ScopeExit.h>
 
 #include <rapidjson/document.h>
+#include <siphash.h>
 
 #include <llvm/ADT/STLExtras.h>
 
@@ -22,6 +23,15 @@
 
 namespace ccls {
 namespace {
+
+template <typename QueryFileType>
+std::enable_if_t<std::is_same_v<std::decay_t<QueryFileType>, QueryFile>,
+                 std::string>
+serializeQueryFile(QueryFileType &&m) {
+  auto buf = cista::serialize(m);
+  return std::string(reinterpret_cast<const char *>(buf.data()), buf.size());
+}
+
 void assignFileId(const Lid2file_id &lid2file_id, int file_id, Use &use) {
   if (use.file_id == -1)
     use.file_id = file_id;
@@ -29,52 +39,30 @@ void assignFileId(const Lid2file_id &lid2file_id, int file_id, Use &use) {
     use.file_id = lid2file_id.find(use.file_id)->second;
 }
 
-template <typename T>
-void addRange(std::vector<T> &into, const std::vector<T> &from) {
-  into.insert(into.end(), from.begin(), from.end());
-}
-
-template <typename T>
-void removeRange(std::vector<T> &from, const std::vector<T> &to_remove) {
-  if (to_remove.size()) {
-    std::unordered_set<T> to_remove_set(to_remove.begin(), to_remove.end());
-    from.erase(
-        std::remove_if(from.begin(), from.end(),
-                       [&](const T &t) { return to_remove_set.count(t) > 0; }),
-        from.end());
-  }
+FileDef::IndexInclude convert(const IndexInclude &o) {
+  return {o.line, o.resolved_path};
 }
 
 QueryFile::DefUpdate buildFileDefUpdate(IndexFile &&indexed) {
-  QueryFile::Def def;
+  FileDef def;
   def.path = std::move(indexed.path);
-  def.args = std::move(indexed.args);
-  def.includes = std::move(indexed.includes);
-  def.skipped_ranges = std::move(indexed.skipped_ranges);
+  for (auto s : indexed.args)
+    def.args.emplace_back(s);
+  for (auto &m : indexed.includes)
+    def.includes.emplace_back(convert(m));
+  def.skipped_ranges.set(indexed.skipped_ranges.begin(),
+                         indexed.skipped_ranges.end());
   def.dependencies.reserve(indexed.dependencies.size());
   for (auto &dep : indexed.dependencies)
     def.dependencies.push_back(dep.first.val().data()); // llvm 8 -> data()
   def.language = indexed.language;
+  def.mtime = indexed.mtime;
   return {std::move(def), std::move(indexed.file_contents)};
 }
-
-// Returns true if an element with the same file is found.
-template <typename Q>
-bool tryReplaceDef(llvm::SmallVectorImpl<Q> &def_list, Q &&def) {
-  for (auto &def1 : def_list)
-    if (def1.file_id == def.file_id) {
-      def1 = std::move(def);
-      return true;
-    }
-  return false;
-}
-
 } // namespace
 
-template <typename T> Vec<T> convert(const std::vector<T> &o) {
-  Vec<T> r{std::make_unique<T[]>(o.size()), (int)o.size()};
-  std::copy(o.begin(), o.end(), r.begin());
-  return r;
+template <typename T> cista_types::vector<T> convert(const std::vector<T> &o) {
+  return {o.begin(), o.end()};
 }
 
 QueryFunc::Def convert(const IndexFunc::Def &o) {
@@ -116,6 +104,22 @@ QueryType::Def convert(const IndexType::Def &o) {
   return r;
 }
 
+QueryVar::Def convert(const IndexVar::Def &o) {
+  QueryVar::Def r;
+  r.detailed_name = o.detailed_name;
+  r.hover = o.hover;
+  r.comments = o.comments;
+  r.spell = o.spell;
+  r.type = o.type;
+  // no file_id
+  r.qual_name_offset = o.qual_name_offset;
+  r.short_name_offset = o.short_name_offset;
+  r.short_name_size = o.short_name_size;
+  r.kind = o.kind;
+  r.parent_kind = o.parent_kind;
+  return r;
+}
+
 IndexUpdate IndexUpdate::createDelta(IndexFile *previous, IndexFile *current) {
   IndexUpdate r;
   static IndexFile empty(current->path, "<empty>", false);
@@ -128,7 +132,7 @@ IndexUpdate IndexUpdate::createDelta(IndexFile *previous, IndexFile *current) {
   r.funcs_hint = int(current->usr2func.size() - previous->usr2func.size());
   for (auto &it : previous->usr2func) {
     auto &func = it.second;
-    if (func.def.detailed_name[0])
+    if (!std::string_view(func.def.detailed_name).empty())
       r.funcs_removed.emplace_back(func.usr, convert(func.def));
     r.funcs_declarations[func.usr].first = std::move(func.declarations);
     r.funcs_uses[func.usr].first = std::move(func.uses);
@@ -136,7 +140,7 @@ IndexUpdate IndexUpdate::createDelta(IndexFile *previous, IndexFile *current) {
   }
   for (auto &it : current->usr2func) {
     auto &func = it.second;
-    if (func.def.detailed_name[0])
+    if (!std::string_view(func.def.detailed_name).empty())
       r.funcs_def_update.emplace_back(it.first, convert(func.def));
     r.funcs_declarations[func.usr].second = std::move(func.declarations);
     r.funcs_uses[func.usr].second = std::move(func.uses);
@@ -146,7 +150,7 @@ IndexUpdate IndexUpdate::createDelta(IndexFile *previous, IndexFile *current) {
   r.types_hint = int(current->usr2type.size() - previous->usr2type.size());
   for (auto &it : previous->usr2type) {
     auto &type = it.second;
-    if (type.def.detailed_name[0])
+    if (!std::string_view(type.def.detailed_name).empty())
       r.types_removed.emplace_back(type.usr, convert(type.def));
     r.types_declarations[type.usr].first = std::move(type.declarations);
     r.types_uses[type.usr].first = std::move(type.uses);
@@ -155,7 +159,7 @@ IndexUpdate IndexUpdate::createDelta(IndexFile *previous, IndexFile *current) {
   };
   for (auto &it : current->usr2type) {
     auto &type = it.second;
-    if (type.def.detailed_name[0])
+    if (!std::string_view(type.def.detailed_name).empty())
       r.types_def_update.emplace_back(it.first, convert(type.def));
     r.types_declarations[type.usr].second = std::move(type.declarations);
     r.types_uses[type.usr].second = std::move(type.uses);
@@ -166,15 +170,15 @@ IndexUpdate IndexUpdate::createDelta(IndexFile *previous, IndexFile *current) {
   r.vars_hint = int(current->usr2var.size() - previous->usr2var.size());
   for (auto &it : previous->usr2var) {
     auto &var = it.second;
-    if (var.def.detailed_name[0])
-      r.vars_removed.emplace_back(var.usr, var.def);
+    if (!std::string_view(var.def.detailed_name).empty())
+      r.vars_removed.emplace_back(var.usr, convert(var.def));
     r.vars_declarations[var.usr].first = std::move(var.declarations);
     r.vars_uses[var.usr].first = std::move(var.uses);
   }
   for (auto &it : current->usr2var) {
     auto &var = it.second;
-    if (var.def.detailed_name[0])
-      r.vars_def_update.emplace_back(it.first, var.def);
+    if (!std::string_view(var.def.detailed_name).empty())
+      r.vars_def_update.emplace_back(it.first, convert(var.def));
     r.vars_declarations[var.usr].second = std::move(var.declarations);
     r.vars_uses[var.usr].second = std::move(var.uses);
   }
@@ -183,90 +187,111 @@ IndexUpdate IndexUpdate::createDelta(IndexFile *previous, IndexFile *current) {
   return r;
 }
 
+SubdbContainer<EntityID, Usr> QueryFunc::derivedContainer(const DB &db) const {
+  return (db.entityDerivedContainer(*this));
+}
+
+SubdbContainer<EntityID, Usr> QueryType::derivedContainer(const DB &db) const {
+  return (db.entityDerivedContainer(*this));
+}
+
+SubdbContainer<EntityID, Usr> QueryType::instanceContainer(const DB &db) const {
+  return (db.entityInstanceContainer(*this));
+}
+
+QueryStore::QueryStore(std::string_view store_path)
+    : env(std::move(env.create().set_max_dbs(48).open(
+          store_path.data(),
+          MDB_WRITEMAP | MDB_WRITEMAP_FSYNC | MDB_NOMETASYNC))) {
+  lmdb::txn txn(lmdb::txn::begin(env, nullptr, 0));
+  dbi_files = lmdb::dbi::open(txn, "files", MDB_INTEGERKEY | MDB_CREATE);
+  dbi_name2file_id = lmdb::dbi::open(txn, "name2file_id", MDB_CREATE);
+
+  entities = lmdb::dbi::open(txn, "dbi_entities", MDB_CREATE);
+  entities_defs =
+      lmdb::dbi::open(txn, "dbi_entities_def", MDB_DUPSORT | MDB_CREATE);
+  entities_declarations = lmdb::dbi::open(txn, "dbi_entities_declarations",
+                                          MDB_DUPSORT | MDB_CREATE);
+  entities_derived =
+      lmdb::dbi::open(txn, "dbi_entities_derived", MDB_DUPSORT | MDB_CREATE);
+  entities_instances =
+      lmdb::dbi::open(txn, "dbi_entities_instances", MDB_DUPSORT | MDB_CREATE);
+  entities_uses =
+      lmdb::dbi::open(txn, "dbi_entities_uses", MDB_DUPSORT | MDB_CREATE);
+  kind_to_entity_id =
+      lmdb::dbi::open(txn, "kind_to_entity_id", MDB_DUPSORT | MDB_CREATE);
+
+  lmdb::dbi_set_dupsort(
+      txn, entities_defs, [](const MDB_val *a, const MDB_val *b) -> int {
+        auto a_def = static_cast<const QueryEntityDef *>(a->mv_data);
+        auto b_def = static_cast<const QueryEntityDef *>(b->mv_data);
+        if (a_def->file_id < b_def->file_id)
+          return -1;
+        return (a_def->file_id > b_def->file_id) ? 1 : 0;
+      });
+
+  txn.commit();
+}
+
+void QueryStore::increaseMapSize() {
+  MDB_envinfo envinfo;
+  lmdb::env_info(env, &envinfo);
+  mdb_size_t increment =
+      std::max(envinfo.me_mapsize, mdb_size_t(128) * 1024 * 1024);
+  env.set_mapsize(envinfo.me_mapsize + increment);
+}
+
 void DB::clear() {
-  files.clear();
-  name2file_id.clear();
-  func_usr.clear();
-  type_usr.clear();
-  var_usr.clear();
-  funcs.clear();
-  types.clear();
-  vars.clear();
+  qs->dbi_files.drop(txn);
+  qs->dbi_name2file_id.drop(txn);
+  qs->entities.drop(txn);
+  qs->entities_defs.drop(txn);
+  qs->entities_declarations.drop(txn);
+  qs->entities_derived.drop(txn);
+  qs->entities_instances.drop(txn);
+  qs->entities_uses.drop(txn);
+  qs->kind_to_entity_id.drop(txn);
 }
 
 template <typename Def>
-void DB::removeUsrs(Kind kind, int file_id,
+void DB::removeUsrs(int file_id,
                     const std::vector<std::pair<Usr, Def>> &to_remove) {
-  switch (kind) {
-  case Kind::Func: {
-    for (auto &[usr, _] : to_remove) {
-      // FIXME
-      if (!hasFunc(usr))
-        continue;
-      QueryFunc &func = getFunc(usr);
-      auto it = llvm::find_if(func.def, [=](const QueryFunc::Def &def) {
-        return def.file_id == file_id;
-      });
-      if (it != func.def.end())
-        func.def.erase(it);
-    }
-    break;
-  }
-  case Kind::Type: {
-    for (auto &[usr, _] : to_remove) {
-      // FIXME
-      if (!hasType(usr))
-        continue;
-      QueryType &type = getType(usr);
-      auto it = llvm::find_if(type.def, [=](const QueryType::Def &def) {
-        return def.file_id == file_id;
-      });
-      if (it != type.def.end())
-        type.def.erase(it);
-    }
-    break;
-  }
-  case Kind::Var: {
-    for (auto &[usr, _] : to_remove) {
-      // FIXME
-      if (!hasVar(usr))
-        continue;
-      QueryVar &var = getVar(usr);
-      auto it = llvm::find_if(var.def, [=](const QueryVar::Def &def) {
-        return def.file_id == file_id;
-      });
-      if (it != var.def.end())
-        var.def.erase(it);
-    }
-    break;
-  }
-  default:
-    break;
+  constexpr Kind kind = DefToKind<Def>();
+  for (auto &[usr, _] : to_remove) {
+    if (!hasEntityId(kind, usr))
+      continue;
+    EntityID id = makeEntityID(kind, usr);
+    QueryEntityDef tdef;
+    tdef.file_id = file_id;
+    qs->entities_defs.del(txn, lmdb::to_sv(id), lmdb::to_sv(tdef));
   }
 }
 
 void DB::applyIndexUpdate(IndexUpdate *u) {
-#define REMOVE_ADD(C, F)                                                       \
+#define REMOVE_ADD(Kind, C, F)                                                 \
   for (auto &it : u->C##s_##F) {                                               \
-    auto r = C##_usr.try_emplace({it.first}, C##_usr.size());                  \
-    if (r.second) {                                                            \
-      C##s.emplace_back();                                                     \
-      C##s.back().usr = it.first;                                              \
-    }                                                                          \
-    auto &entity = C##s[r.first->second];                                      \
-    removeRange(entity.F, it.second.first);                                    \
-    addRange(entity.F, it.second.second);                                      \
+    auto usr = it.first;                                                       \
+    auto e = idPutEntity(Kind, usr).first;                                     \
+    for (auto &v : it.second.first)                                            \
+      qs->entities_##F.del(txn, lmdb::to_sv(e.id), lmdb::to_sv(v));            \
+    for (auto &v : it.second.second)                                           \
+      qs->entities_##F.put(txn, lmdb::to_sv(e.id), lmdb::to_sv(v));            \
   }
 
+  std::unordered_map<int, QueryFile> files;
   std::unordered_map<int, int> prev_lid2file_id, lid2file_id;
   for (auto &[lid, path] : u->prev_lid2path)
     prev_lid2file_id[lid] = getFileId(path);
   for (auto &[lid, path] : u->lid2path) {
     int file_id = getFileId(path);
+    auto [it, inserted] = files.try_emplace(file_id);
+    auto &file = it->second;
+    if (inserted)
+      file = getFile(file_id);
     lid2file_id[lid] = file_id;
-    if (!files[file_id].def) {
-      files[file_id].def = QueryFile::Def();
-      files[file_id].def->path = path;
+    if (!file.def) {
+      file.def = {};
+      file.def->path = path;
     }
   }
 
@@ -294,131 +319,227 @@ void DB::applyIndexUpdate(IndexUpdate *u) {
       files[dr.file_id].symbol2refcnt.erase(sym);
   };
 
-  auto updateUses =
-      [&](Usr usr, Kind kind,
-          llvm::DenseMap<Usr, int, DenseMapInfoForUsr> &entity_usr,
-          auto &entities, auto &p, bool hint_implicit) {
-        auto r = entity_usr.try_emplace(usr, entity_usr.size());
-        if (r.second) {
-          entities.emplace_back();
-          entities.back().usr = usr;
-        }
-        auto &entity = entities[r.first->second];
-        for (Use &use : p.first) {
-          if (hint_implicit && use.role & Role::Implicit) {
-            // Make ranges of implicit function calls larger (spanning one more
-            // column to the left/right). This is hacky but useful. e.g.
-            // textDocument/definition on the space/semicolon in `A a;` or `
-            // 42;` will take you to the constructor.
-            if (use.range.start.column > 0)
-              use.range.start.column--;
-            use.range.end.column++;
-          }
-          ref(prev_lid2file_id, usr, kind, use, -1);
-        }
-        removeRange(entity.uses, p.first);
-        for (Use &use : p.second) {
-          if (hint_implicit && use.role & Role::Implicit) {
-            if (use.range.start.column > 0)
-              use.range.start.column--;
-            use.range.end.column++;
-          }
-          ref(lid2file_id, usr, kind, use, 1);
-        }
-        addRange(entity.uses, p.second);
-      };
+  auto updateUses = [&](Usr usr, Kind kind, auto &p, bool hint_implicit,
+                        lmdb::dbi &dbi_entities_uses) {
+    auto [entity, _] = idPutEntity(kind, usr);
+    for (Use &use : p.first) {
+      if (hint_implicit && use.role & Role::Implicit) {
+        // Make ranges of implicit function calls larger (spanning one more
+        // column to the left/right). This is hacky but useful. e.g.
+        // textDocument/definition on the space/semicolon in `A a;` or `
+        // 42;` will take you to the constructor.
+        if (use.range.start.column > 0)
+          use.range.start.column--;
+        use.range.end.column++;
+      }
+      ref(prev_lid2file_id, usr, kind, use, -1);
+    }
+    for (Use &use : p.first)
+      dbi_entities_uses.del(txn, lmdb::to_sv(entity.id), lmdb::to_sv(use));
+    for (Use &use : p.second) {
+      if (hint_implicit && use.role & Role::Implicit) {
+        if (use.range.start.column > 0)
+          use.range.start.column--;
+        use.range.end.column++;
+      }
+      ref(lid2file_id, usr, kind, use, 1);
+    }
+    for (Use &use : p.second)
+      dbi_entities_uses.put(txn, lmdb::to_sv(entity.id), lmdb::to_sv(use));
+  };
 
-  if (u->files_removed)
-    files[name2file_id[lowerPathIfInsensitive(*u->files_removed)]].def =
-        std::nullopt;
-  u->file_id =
-      u->files_def_update ? update(std::move(*u->files_def_update)) : -1;
-
-  const double grow = 1.3;
-  size_t t;
-
-  if ((t = funcs.size() + u->funcs_hint) > funcs.capacity()) {
-    t = size_t(t * grow);
-    funcs.reserve(t);
-    func_usr.reserve(t);
+  if (u->files_removed) {
+    std::string normalized_name = lowerPathIfInsensitive(*u->files_removed);
+    if (std::string_view val;
+        qs->dbi_name2file_id.get(txn, normalized_name, val)) {
+      int file_id = lmdb::from_sv<int>(val);
+      files[file_id].def = decltype(files[file_id].def)();
+    }
   }
+  u->file_id =
+      u->files_def_update ? update(files, std::move(*u->files_def_update)) : -1;
+
   for (auto &[usr, def] : u->funcs_removed)
     if (def.spell)
       refDecl(prev_lid2file_id, usr, Kind::Func, *def.spell, -1);
-  removeUsrs(Kind::Func, u->file_id, u->funcs_removed);
-  update(lid2file_id, u->file_id, std::move(u->funcs_def_update));
+  removeUsrs(u->file_id, u->funcs_removed);
+  update(files, lid2file_id, u->file_id, std::move(u->funcs_def_update));
   for (auto &[usr, del_add] : u->funcs_declarations) {
     for (DeclRef &dr : del_add.first)
       refDecl(prev_lid2file_id, usr, Kind::Func, dr, -1);
     for (DeclRef &dr : del_add.second)
       refDecl(lid2file_id, usr, Kind::Func, dr, 1);
   }
-  REMOVE_ADD(func, declarations);
-  REMOVE_ADD(func, derived);
+  REMOVE_ADD(Kind::Func, func, declarations);
+  REMOVE_ADD(Kind::Func, func, derived);
   for (auto &[usr, p] : u->funcs_uses)
-    updateUses(usr, Kind::Func, func_usr, funcs, p, true);
+    updateUses(usr, Kind::Func, p, true, qs->entities_uses);
 
-  if ((t = types.size() + u->types_hint) > types.capacity()) {
-    t = size_t(t * grow);
-    types.reserve(t);
-    type_usr.reserve(t);
-  }
   for (auto &[usr, def] : u->types_removed)
     if (def.spell)
       refDecl(prev_lid2file_id, usr, Kind::Type, *def.spell, -1);
-  removeUsrs(Kind::Type, u->file_id, u->types_removed);
-  update(lid2file_id, u->file_id, std::move(u->types_def_update));
+  removeUsrs(u->file_id, u->types_removed);
+  update(files, lid2file_id, u->file_id, std::move(u->types_def_update));
   for (auto &[usr, del_add] : u->types_declarations) {
     for (DeclRef &dr : del_add.first)
       refDecl(prev_lid2file_id, usr, Kind::Type, dr, -1);
     for (DeclRef &dr : del_add.second)
       refDecl(lid2file_id, usr, Kind::Type, dr, 1);
   }
-  REMOVE_ADD(type, declarations);
-  REMOVE_ADD(type, derived);
-  REMOVE_ADD(type, instances);
+  REMOVE_ADD(Kind::Type, type, declarations);
+  REMOVE_ADD(Kind::Type, type, derived);
+  REMOVE_ADD(Kind::Type, type, instances);
   for (auto &[usr, p] : u->types_uses)
-    updateUses(usr, Kind::Type, type_usr, types, p, false);
+    updateUses(usr, Kind::Type, p, false, qs->entities_uses);
 
-  if ((t = vars.size() + u->vars_hint) > vars.capacity()) {
-    t = size_t(t * grow);
-    vars.reserve(t);
-    var_usr.reserve(t);
-  }
   for (auto &[usr, def] : u->vars_removed)
     if (def.spell)
       refDecl(prev_lid2file_id, usr, Kind::Var, *def.spell, -1);
-  removeUsrs(Kind::Var, u->file_id, u->vars_removed);
-  update(lid2file_id, u->file_id, std::move(u->vars_def_update));
+  removeUsrs(u->file_id, u->vars_removed);
+  update(files, lid2file_id, u->file_id, std::move(u->vars_def_update));
   for (auto &[usr, del_add] : u->vars_declarations) {
     for (DeclRef &dr : del_add.first)
       refDecl(prev_lid2file_id, usr, Kind::Var, dr, -1);
     for (DeclRef &dr : del_add.second)
       refDecl(lid2file_id, usr, Kind::Var, dr, 1);
   }
-  REMOVE_ADD(var, declarations);
+  REMOVE_ADD(Kind::Var, var, declarations);
   for (auto &[usr, p] : u->vars_uses)
-    updateUses(usr, Kind::Var, var_usr, vars, p, false);
+    updateUses(usr, Kind::Var, p, false, qs->entities_uses);
 
+  for (auto &p : files) {
+    qs->dbi_files.put(txn, lmdb::to_sv(p.first), serializeQueryFile(p.second));
+  }
 #undef REMOVE_ADD
 }
 
-int DB::getFileId(const std::string &path) {
-  auto it = name2file_id.try_emplace(lowerPathIfInsensitive(path));
-  if (it.second) {
-    int id = files.size();
-    it.first->second = files.emplace_back().id = id;
-  }
-  return it.first->second;
+void DB::populateVFS(VFS *vfs) const {
+  std::unordered_set<std::string> step1;
+  std::lock_guard lock(vfs->mutex);
+  foreachFile([&](const QueryFile &file) {
+    if (!file.def)
+      return true;
+    vfs->state[file.def->path.str()].loaded = 1;
+    vfs->state[file.def->path.str()].step = 0;
+    vfs->state[file.def->path.str()].timestamp = file.def->mtime;
+    for (auto &dep : file.def->dependencies)
+      step1.insert(dep.str());
+    return true;
+  });
+  for (auto &dep : step1)
+    vfs->state[dep].step = 1;
 }
 
-int DB::update(QueryFile::DefUpdate &&u) {
+const QueryFile &DB::getFile(int file_id) const {
+  static QueryFile empty;
+  if (std::string_view val; qs->dbi_files.get(txn, lmdb::to_sv(file_id), val))
+    return *lmdb::ptr_from_sv<QueryFile>(val);
+  return empty;
+}
+
+void DB::putFile(int file_id, QueryFile &file) {
+  qs->dbi_files.put(txn, lmdb::to_sv(file_id), serializeQueryFile(file));
+}
+
+template <typename ET, typename Def>
+void DB::insertEntityDef(ET &&e, Def &&def) {
+  auto pdef_buf = cista::serialize(def);
+  std::string_view pdef_sv(reinterpret_cast<const char *>(pdef_buf.data()),
+                           pdef_buf.size());
+  qs->entities_defs.put(txn, lmdb::to_sv(e.id), pdef_sv);
+}
+
+void DB::foreachFile(std::function<bool(const QueryFile &)> &fn) const {
+  std::string_view key, val;
+  auto cur = lmdb::cursor::open(txn, qs->dbi_files);
+  while (cur.get(key, val, MDB_NEXT)) {
+    const auto &file = *lmdb::ptr_from_sv<QueryFile>(val);
+    if (!fn(file))
+      break;
+  }
+}
+
+int DB::getFileId(std::string_view path) {
+  std::string normalized_name = lowerPathIfInsensitive(path);
+  int id = qs->dbi_files.size(txn);
+  MDB_val key{.mv_size = normalized_name.size(),
+              .mv_data = normalized_name.data()},
+      val{.mv_size = sizeof(id), .mv_data = &id};
+  if (!lmdb::dbi_put(txn, qs->dbi_name2file_id, &key, &val, MDB_NOOVERWRITE)) {
+    id = *static_cast<decltype(id) *>(val.mv_data);
+  } else {
+    qs->dbi_files.put(txn, lmdb::to_sv(id), serializeQueryFile(QueryFile{id}));
+  }
+  return id;
+}
+
+template <Kind kind>
+std::pair<QueryEntityType<kind>, bool> DB::idPutEntity(Usr usr) {
+  EntityID id = makeEntityID(kind, usr);
+  QueryEntityType<kind> entity;
+  entity.id = id;
+  entity.usr = usr;
+  entity.kind = kind;
+  bool Result = qs->entities.put(txn, lmdb::to_sv(id), lmdb::to_sv(entity),
+                                 MDB_NOOVERWRITE);
+  if (Result)
+    qs->kind_to_entity_id.put(txn, lmdb::to_sv(kind), lmdb::to_sv(id));
+  return {entity, Result};
+}
+
+std::pair<QueryEntity, bool> DB::idPutEntity(Kind kind, Usr usr) {
+  switch (kind) {
+  case Kind::Func:
+    return idPutEntity<Kind::Func>(usr);
+  case Kind::Type:
+    return idPutEntity<Kind::Type>(usr);
+  case Kind::Var:
+    return idPutEntity<Kind::Var>(usr);
+  default:
+    throw std::runtime_error("Inserting invalid kind of entities");
+  }
+}
+
+void DB::idRemoveEntity(SubdbIterator<EntityID, QueryEntity> &&it) {
+  const QueryEntity &entity = *it;
+  qs->entities_defs.del(txn, lmdb::to_sv(entity.id));
+  qs->entities_declarations.del(txn, lmdb::to_sv(entity.id));
+  qs->entities_uses.del(txn, lmdb::to_sv(entity.id));
+  if (entity.kind == Kind::Func) {
+    qs->entities_derived.del(txn, lmdb::to_sv(entity.id));
+  } else if (entity.kind == Kind::Type) {
+    qs->entities_derived.del(txn, lmdb::to_sv(entity.id));
+    qs->entities_instances.del(txn, lmdb::to_sv(entity.id));
+  }
+  qs->kind_to_entity_id.del(txn, lmdb::to_sv(entity.kind),
+                            lmdb::to_sv(entity.id));
+  qs->entities.del(txn, lmdb::to_sv(entity.id));
+}
+
+std::optional<int> DB::findFileId(const std::string &path) const {
+  std::string normalized_name = lowerPathIfInsensitive(path);
+  if (std::string_view val;
+      qs->dbi_name2file_id.get(txn, normalized_name, val)) {
+    return lmdb::from_sv<int>(val);
+  }
+  return {};
+}
+
+int DB::update(std::unordered_map<int, QueryFile> &files,
+               QueryFile::DefUpdate &&u) {
   int file_id = getFileId(u.first.path);
-  files[file_id].def = u.first;
+  QueryFile file;
+  if (auto it = files.find(file_id); it == files.end())
+    file = getFile(file_id);
+  else
+    file = it->second;
+  file.def = u.first;
+  files[file_id] = file;
   return file_id;
 }
 
-void DB::update(const Lid2file_id &lid2file_id, int file_id,
+void DB::update(std::unordered_map<int, QueryFile> &files,
+                const Lid2file_id &lid2file_id, int file_id,
                 std::vector<std::pair<Usr, QueryFunc::Def>> &&us) {
   for (auto &u : us) {
     auto &def = u.second;
@@ -430,18 +551,13 @@ void DB::update(const Lid2file_id &lid2file_id, int file_id,
           {def.spell->range, u.first, Kind::Func, def.spell->role},
           def.spell->extent}]++;
     }
-
-    auto r = func_usr.try_emplace({u.first}, func_usr.size());
-    if (r.second)
-      funcs.emplace_back();
-    QueryFunc &existing = funcs[r.first->second];
-    existing.usr = u.first;
-    if (!tryReplaceDef(existing.def, std::move(def)))
-      existing.def.push_back(std::move(def));
+    auto [entity, _] = idPutEntity<Kind::Func>(u.first);
+    insertEntityDef(entity, def);
   }
 }
 
-void DB::update(const Lid2file_id &lid2file_id, int file_id,
+void DB::update(std::unordered_map<int, QueryFile> &files,
+                const Lid2file_id &lid2file_id, int file_id,
                 std::vector<std::pair<Usr, QueryType::Def>> &&us) {
   for (auto &u : us) {
     auto &def = u.second;
@@ -453,17 +569,13 @@ void DB::update(const Lid2file_id &lid2file_id, int file_id,
           {def.spell->range, u.first, Kind::Type, def.spell->role},
           def.spell->extent}]++;
     }
-    auto r = type_usr.try_emplace({u.first}, type_usr.size());
-    if (r.second)
-      types.emplace_back();
-    QueryType &existing = types[r.first->second];
-    existing.usr = u.first;
-    if (!tryReplaceDef(existing.def, std::move(def)))
-      existing.def.push_back(std::move(def));
+    auto [entity, _] = idPutEntity<Kind::Type>(u.first);
+    insertEntityDef(entity, def);
   }
 }
 
-void DB::update(const Lid2file_id &lid2file_id, int file_id,
+void DB::update(std::unordered_map<int, QueryFile> &files,
+                const Lid2file_id &lid2file_id, int file_id,
                 std::vector<std::pair<Usr, QueryVar::Def>> &&us) {
   for (auto &u : us) {
     auto &def = u.second;
@@ -475,57 +587,111 @@ void DB::update(const Lid2file_id &lid2file_id, int file_id,
           {def.spell->range, u.first, Kind::Var, def.spell->role},
           def.spell->extent}]++;
     }
-    auto r = var_usr.try_emplace({u.first}, var_usr.size());
-    if (r.second)
-      vars.emplace_back();
-    QueryVar &existing = vars[r.first->second];
-    existing.usr = u.first;
-    if (!tryReplaceDef(existing.def, std::move(def)))
-      existing.def.push_back(std::move(def));
+    auto [entity, _] = idPutEntity<Kind::Var>(u.first);
+    insertEntityDef(entity, def);
   }
 }
 
-std::string_view DB::getSymbolName(SymbolIdx sym, bool qualified) {
+std::string DB::getSymbolName(SymbolIdx sym, bool qualified) const {
   Usr usr = sym.usr;
   switch (sym.kind) {
   default:
     break;
-  case Kind::File:
-    if (files[usr].def)
-      return files[usr].def->path;
-    break;
+  case Kind::File: {
+    std::string_view val;
+    if (qs->dbi_files.get(txn, lmdb::to_sv(usr), val)) {
+      if (const auto &file = *lmdb::ptr_from_sv<QueryFile>(val); file.def)
+        return file.def->path.str();
+    }
+  } break;
   case Kind::Func:
-    if (const auto *def = getFunc(usr).anyDef())
-      return def->name(qualified);
+    if (const auto &def = getFunc(usr).getAnyDef(*this))
+      return std::string(def->name(qualified));
     break;
   case Kind::Type:
-    if (const auto *def = getType(usr).anyDef())
-      return def->name(qualified);
+    if (const auto &def = getType(usr).getAnyDef(*this))
+      return std::string(def->name(qualified));
     break;
   case Kind::Var:
-    if (const auto *def = getVar(usr).anyDef())
-      return def->name(qualified);
+    if (const auto &def = getVar(usr).getAnyDef(*this))
+      return std::string(def->name(qualified));
     break;
   }
   return "";
 }
 
-std::vector<uint8_t> DB::getFileSet(const std::vector<std::string> &folders) {
+std::vector<uint8_t>
+DB::getFileSet(const std::vector<std::string> &folders) const {
   if (folders.empty())
-    return std::vector<uint8_t>(files.size(), 1);
-  std::vector<uint8_t> file_set(files.size());
-  for (QueryFile &file : files)
+    return std::vector<uint8_t>(qs->dbi_files.size(txn), 1);
+  std::vector<uint8_t> file_set(qs->dbi_files.size(txn));
+  std::string_view key, val;
+  auto cur = lmdb::cursor::open(txn, qs->dbi_files);
+  while (cur.get(key, val, MDB_NEXT)) {
+    const auto &file = *lmdb::ptr_from_sv<QueryFile>(val);
     if (file.def) {
       bool ok = false;
       for (auto &folder : folders)
-        if (llvm::StringRef(file.def->path).startswith(folder)) {
+        if (llvm::StringRef(file.def->path).starts_with(folder)) {
           ok = true;
           break;
         }
       if (ok)
         file_set[file.id] = 1;
     }
+  }
   return file_set;
+}
+
+bool DB::hasEntityId(Kind kind, Usr usr) const {
+  EntityID id = makeEntityID(kind, usr);
+  switch (kind) {
+  case Kind::Func:
+  case Kind::Type:
+  case Kind::Var:
+    break;
+  case Kind::File:
+  case Kind::Invalid:
+    return false;
+  }
+  if (std::string_view v; !qs->entities.get(txn, lmdb::to_sv(id), v))
+    return false;
+  return true;
+}
+
+const QueryEntity &DB::id2Entity(EntityID id) const {
+  std::string_view val;
+  if (!qs->entities.get(txn, lmdb::to_sv(id), val))
+    throw std::out_of_range(
+        "Unexpected: Entity not found in entities database");
+  return *lmdb::ptr_from_sv<QueryEntity>(val);
+}
+
+SubdbContainer<EntityID, QueryEntityDef>
+DB::entityDefContainer(const QueryEntity &entity) const {
+  return SubdbContainer<EntityID, QueryEntityDef>(txn, qs->entities_defs,
+                                                  entity.id);
+}
+
+SubdbContainer<EntityID, DeclRef>
+DB::entityDeclContainer(const QueryEntity &entity) const {
+  return SubdbContainer<EntityID, DeclRef>(txn, qs->entities_declarations,
+                                           entity.id);
+}
+
+SubdbContainer<EntityID, Usr>
+DB::entityDerivedContainer(const QueryEntity &entity) const {
+  return SubdbContainer<EntityID, Usr>(txn, qs->entities_derived, entity.id);
+}
+
+SubdbContainer<EntityID, Usr>
+DB::entityInstanceContainer(const QueryEntity &entity) const {
+  return SubdbContainer<EntityID, Usr>(txn, qs->entities_instances, entity.id);
+}
+
+SubdbContainer<EntityID, Use>
+DB::entityUseContainer(const QueryEntity &entity) const {
+  return SubdbContainer<EntityID, Use>(txn, qs->entities_uses, entity.id);
 }
 
 namespace {
@@ -535,27 +701,6 @@ int computeRangeSize(const Range &range) {
     return INT_MAX;
   return range.end.column - range.start.column;
 }
-
-template <typename Q, typename C>
-std::vector<Use>
-getDeclarations(llvm::DenseMap<Usr, int, DenseMapInfoForUsr> &entity_usr,
-                llvm::SmallVectorImpl<Q> &entities, const C &usrs) {
-  std::vector<Use> ret;
-  ret.reserve(usrs.size());
-  for (Usr usr : usrs) {
-    Q &entity = entities[entity_usr[{usr}]];
-    bool has_def = false;
-    for (auto &def : entity.def)
-      if (def.spell) {
-        ret.push_back(*def.spell);
-        has_def = true;
-        break;
-      }
-    if (!has_def && entity.declarations.size())
-      ret.push_back(entity.declarations[0]);
-  }
-  return ret;
-}
 } // namespace
 
 Maybe<DeclRef> getDefinitionSpell(DB *db, SymbolIdx sym) {
@@ -564,23 +709,37 @@ Maybe<DeclRef> getDefinitionSpell(DB *db, SymbolIdx sym) {
   return ret;
 }
 
-std::vector<Use> getFuncDeclarations(DB *db, const std::vector<Usr> &usrs) {
-  return getDeclarations(db->func_usr, db->funcs, usrs);
+template <typename C>
+std::vector<Use> getDeclarations(DB *db, Kind kind, C &&usrs) {
+  std::vector<Use> ret;
+  allOf(usrs, [&](Usr usr) {
+    withEntity(db, {usr, kind}, [db, &ret](const auto &entity) {
+      bool has_def = false;
+      auto defs = entity.defContainer(*db);
+      for (const auto &def : entity.defContainer(*db)) {
+        if (def.spell) {
+          ret.push_back(*def.spell);
+          has_def = true;
+        }
+      }
+      if (!has_def) {
+        for (const auto &dr : entity.declContainer(*db))
+          ret.push_back(dr);
+      }
+    });
+    return true;
+  });
+  return ret;
 }
-std::vector<Use> getFuncDeclarations(DB *db, const Vec<Usr> &usrs) {
-  return getDeclarations(db->func_usr, db->funcs, usrs);
-}
-std::vector<Use> getTypeDeclarations(DB *db, const std::vector<Usr> &usrs) {
-  return getDeclarations(db->type_usr, db->types, usrs);
-}
-std::vector<DeclRef> getVarDeclarations(DB *db, const std::vector<Usr> &usrs,
-                                        unsigned kind) {
+
+template <typename RangeType>
+std::vector<DeclRef> getVarDeclarationsImpl(DB *db, RangeType &&usrs,
+                                            unsigned kind) {
   std::vector<DeclRef> ret;
-  ret.reserve(usrs.size());
-  for (Usr usr : usrs) {
-    QueryVar &var = db->getVar(usr);
+  forEach(usrs, [&](Usr usr) {
     bool has_def = false;
-    for (auto &def : var.def)
+    auto entity = db->getFunc(usr);
+    for (const auto &def : entity.defContainer(*db)) {
       if (def.spell) {
         has_def = true;
         // See messages/ccls_vars.cc
@@ -597,41 +756,64 @@ std::vector<DeclRef> getVarDeclarations(DB *db, const std::vector<Usr> &usrs,
         ret.push_back(*def.spell);
         break;
       }
-    if (!has_def && var.declarations.size())
-      ret.push_back(var.declarations[0]);
-  }
+    }
+    if (!has_def) {
+      for (const auto &dr : entity.declContainer(*db))
+        ret.push_back(dr);
+    }
+  });
   return ret;
 }
 
-std::vector<DeclRef> &getNonDefDeclarations(DB *db, SymbolIdx sym) {
-  static std::vector<DeclRef> empty;
-  switch (sym.kind) {
-  case Kind::Func:
-    return db->getFunc(sym).declarations;
-  case Kind::Type:
-    return db->getType(sym).declarations;
-  case Kind::Var:
-    return db->getVar(sym).declarations;
-  default:
-    break;
-  }
-  return empty;
+std::vector<Use> getFuncDeclarations(DB *db, llvm::ArrayRef<Usr> usrs) {
+  return getDeclarations(db, Kind::Func, usrs);
+}
+std::vector<Use> getTypeDeclarations(DB *db, llvm::ArrayRef<Usr> usrs) {
+  return getDeclarations(db, Kind::Type, usrs);
+}
+std::vector<DeclRef> getVarDeclarations(DB *db, llvm::ArrayRef<Usr> usrs,
+                                        unsigned kind) {
+  return getVarDeclarationsImpl(db, usrs, kind);
 }
 
-std::vector<Use> getUsesForAllBases(DB *db, QueryFunc &root) {
+std::vector<Use> getFuncDeclarations(DB *db,
+                                     SubdbContainer<EntityID, Usr> &usrs) {
+  return getDeclarations(db, Kind::Func, usrs);
+}
+std::vector<Use> getTypeDeclarations(DB *db,
+                                     SubdbContainer<EntityID, Usr> &usrs) {
+  return getDeclarations(db, Kind::Type, usrs);
+}
+std::vector<DeclRef>
+getVarDeclarations(DB *db, SubdbContainer<EntityID, Usr> &usrs, unsigned kind) {
+  return getVarDeclarationsImpl(db, usrs, kind);
+}
+
+std::vector<DeclRef> getNonDefDeclarations(DB *db, SymbolIdx sym) {
+  std::vector<DeclRef> ret;
+  withEntity(db, sym, [&](const auto &e) {
+    for (const auto &dr : e.declContainer(*db))
+      ret.push_back(dr);
+  });
+  return ret;
+}
+
+std::vector<Use> getUsesForAllBases(DB *db, const QueryFunc &root) {
   std::vector<Use> ret;
-  std::vector<QueryFunc *> stack{&root};
+  std::vector<QueryFunc> stack{root};
   std::unordered_set<Usr> seen;
   seen.insert(root.usr);
   while (!stack.empty()) {
-    QueryFunc &func = *stack.back();
+    QueryFunc func = stack.back();
     stack.pop_back();
-    if (auto *def = func.anyDef()) {
-      eachDefinedFunc(db, def->bases, [&](QueryFunc &func1) {
+    if (auto def = db->entityGetAnyDef(func)) {
+      const auto &bases = def->bases;
+      eachDefinedFunc(db, bases, [&](const QueryFunc &func1) {
         if (!seen.count(func1.usr)) {
           seen.insert(func1.usr);
-          stack.push_back(&func1);
-          ret.insert(ret.end(), func1.uses.begin(), func1.uses.end());
+          stack.push_back(func1);
+          for (const auto &use : func1.useContainer(*db))
+            ret.push_back(use);
         }
       });
     }
@@ -640,21 +822,23 @@ std::vector<Use> getUsesForAllBases(DB *db, QueryFunc &root) {
   return ret;
 }
 
-std::vector<Use> getUsesForAllDerived(DB *db, QueryFunc &root) {
+std::vector<Use> getUsesForAllDerived(DB *db, const QueryFunc &root) {
   std::vector<Use> ret;
-  std::vector<QueryFunc *> stack{&root};
+  std::vector<QueryFunc> stack{root};
   std::unordered_set<Usr> seen;
   seen.insert(root.usr);
   while (!stack.empty()) {
-    QueryFunc &func = *stack.back();
+    QueryFunc func = stack.back();
     stack.pop_back();
-    eachDefinedFunc(db, func.derived, [&](QueryFunc &func1) {
-      if (!seen.count(func1.usr)) {
+    for (const auto &usr : func.derivedContainer(*db)) {
+      if (!seen.count(usr)) {
+        const QueryFunc &func1 = db->getFunc(usr);
         seen.insert(func1.usr);
-        stack.push_back(&func1);
-        ret.insert(ret.end(), func1.uses.begin(), func1.uses.end());
+        stack.push_back(func1);
+        for (const auto &use : func1.useContainer(*db))
+          ret.push_back(use);
       }
-    });
+    }
   }
 
   return ret;
@@ -688,7 +872,7 @@ std::optional<lsRange> getLsRange(WorkingFile *wfile, const Range &location) {
 }
 
 DocumentUri getLsDocumentUri(DB *db, int file_id, std::string *path) {
-  QueryFile &file = db->files[file_id];
+  const QueryFile &file = db->getFile(file_id);
   if (file.def) {
     *path = file.def->path;
     return DocumentUri::fromPath(*path);
@@ -699,7 +883,7 @@ DocumentUri getLsDocumentUri(DB *db, int file_id, std::string *path) {
 }
 
 DocumentUri getLsDocumentUri(DB *db, int file_id) {
-  QueryFile &file = db->files[file_id];
+  const QueryFile &file = db->getFile(file_id);
   if (file.def) {
     return DocumentUri::fromPath(file.def->path);
   } else {
@@ -742,10 +926,9 @@ SymbolKind getSymbolKind(DB *db, SymbolIdx sym) {
   else {
     ret = SymbolKind::Unknown;
     withEntity(db, sym, [&](const auto &entity) {
-      for (auto &def : entity.def) {
-        ret = def.kind;
-        break;
-      }
+      auto defs = entity.defContainer(*db);
+      if (defs.size() != 0)
+        ret = defs.begin()->kind;
     });
   }
   return ret;
@@ -757,7 +940,7 @@ std::optional<SymbolInformation> getSymbolInfo(DB *db, SymbolIdx sym,
   case Kind::Invalid:
     break;
   case Kind::File: {
-    QueryFile &file = db->getFile(sym);
+    const QueryFile &file = db->getFile(sym.usr);
     if (!file.def)
       break;
 
@@ -784,8 +967,8 @@ std::optional<SymbolInformation> getSymbolInfo(DB *db, SymbolIdx sym,
 }
 
 std::vector<SymbolRef> findSymbolsAtLocation(WorkingFile *wfile,
-                                             QueryFile *file, Position &ls_pos,
-                                             bool smallest) {
+                                             const QueryFile *file,
+                                             Position &ls_pos, bool smallest) {
   std::vector<SymbolRef> symbols;
   // If multiVersion > 0, index may not exist and thus index_lines is empty.
   if (wfile && wfile->index_lines.size()) {

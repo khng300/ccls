@@ -4,12 +4,17 @@
 #pragma once
 
 #include "indexer.hh"
-#include "serializer.hh"
 #include "working_files.hh"
 
+#include <cista/serialization.h>
+#include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/DenseMap.h>
-#include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/StringMap.h>
+#include <lmdbxx/lmdb++.h>
+
+#include <array>
+#include <iterator>
+#include <type_traits>
 
 namespace llvm {
 template <> struct DenseMapInfo<ccls::ExtentRef> {
@@ -25,70 +30,444 @@ template <> struct DenseMapInfo<ccls::ExtentRef> {
 } // namespace llvm
 
 namespace ccls {
-struct QueryFile {
-  struct Def {
-    std::string path;
-    std::vector<const char *> args;
-    LanguageId language;
-    // Includes in the file.
-    std::vector<IndexInclude> includes;
-    // Parts of the file which are disabled.
-    std::vector<Range> skipped_ranges;
-    // Used by |$ccls/reload|.
-    std::vector<const char *> dependencies;
-  };
+struct SubdbIteratorImpl {
+  SubdbIteratorImpl() = default;
+  SubdbIteratorImpl(const SubdbIteratorImpl &it) : SubdbIteratorImpl() {
+    copyAssign(it);
+  }
+  SubdbIteratorImpl(SubdbIteratorImpl &&it) : SubdbIteratorImpl() {
+    moveAssign(std::move(it));
+  }
+  SubdbIteratorImpl(const lmdb::cursor &cur) : SubdbIteratorImpl() {
+    if (cur.handle() == nullptr)
+      return;
+    cur_ = cur;
+  }
+  SubdbIteratorImpl(lmdb::cursor &&cur) : SubdbIteratorImpl() {
+    cur_ = std::move(cur);
+  }
 
-  using DefUpdate = std::pair<Def, std::string>;
+  static SubdbIteratorImpl create(lmdb::txn &txn, lmdb::dbi &dbi,
+                                  std::string_view key) {
+    auto cur = lmdb::cursor::open(txn, dbi);
+    if (!cur.get(key, MDB_SET))
+      return SubdbIteratorImpl();
+    return SubdbIteratorImpl(std::move(cur));
+  }
+
+  SubdbIteratorImpl &operator=(SubdbIteratorImpl &rhs) {
+    copyAssign(rhs);
+    return *this;
+  };
+  SubdbIteratorImpl &operator=(SubdbIteratorImpl &&rhs) {
+    moveAssign(std::move(rhs));
+    return *this;
+  }
+
+  lmdb::cursor &cursor() { return cur_; }
+
+  bool is_end() const { return cur_.handle() == nullptr; }
+
+  SubdbIteratorImpl &prev() {
+    operation(MDB_PREV_DUP);
+    return *this;
+  }
+  SubdbIteratorImpl &next() {
+    operation(MDB_NEXT_DUP);
+    return *this;
+  }
+
+  std::string_view current() const {
+    if (is_end())
+      return {};
+    std::string_view v;
+    if (std::string_view k; !cur_.get(k, v, MDB_GET_CURRENT))
+      cur_ = lmdb::cursor(nullptr);
+    return v;
+  }
+
+  bool operator=(const SubdbIteratorImpl &rhs) const {
+    return current().data() == rhs.current().data();
+  }
+
+protected:
+  template <typename, typename> friend struct SubdbContainer;
+
+  void copyAssign(const SubdbIteratorImpl &rhs) {
+    if (this == &rhs)
+      return;
+    cur_ = rhs.cur_;
+  }
+
+  void moveAssign(SubdbIteratorImpl &&rhs) {
+    if (this == &rhs)
+      return;
+    std::swap(cur_, rhs.cur_);
+  }
+
+  bool operation(MDB_cursor_op op) {
+    assert(op == MDB_PREV_DUP || op == MDB_NEXT_DUP);
+    if (is_end())
+      return {};
+    bool exists;
+    if (std::string_view k, v; !(exists = cur_.get(k, v, op)))
+      cur_ = lmdb::cursor(nullptr);
+    return exists;
+  }
+
+  mutable lmdb::cursor cur_{nullptr};
+};
+
+template <typename TypeA, typename TypeB, typename = void> struct Bindable {
+  static constexpr bool value = false;
+};
+template <typename TypeA, typename TypeB>
+struct Bindable<TypeA, TypeB,
+                std::enable_if_t<std::is_same_v<TypeA, TypeB> ||
+                                 std::is_base_of_v<TypeA, TypeB> ||
+                                 std::is_base_of_v<TypeB, TypeA>>> {
+  static constexpr bool value = true;
+};
+template <typename TypeA, typename TypeB>
+static constexpr bool IsBindable = Bindable<TypeA, TypeB>::value;
+
+template <typename Key, typename Value>
+struct SubdbIterator : private SubdbIteratorImpl {
+  typedef Key key_type;
+  typedef Value value_type;
+
+  SubdbIterator() = default;
+  SubdbIterator(const SubdbIterator &it) : SubdbIteratorImpl(it) {};
+  SubdbIterator(SubdbIterator &&it) : SubdbIteratorImpl(std::move(it)) {}
+  template <
+      typename FromKey, typename FromValue,
+      std::enable_if_t<IsBindable<FromKey, Key> && IsBindable<FromValue, Value>,
+                       bool> = true>
+  SubdbIterator(SubdbIterator<FromKey, FromValue> &&it)
+      : SubdbIteratorImpl(std::move(it)) {}
+  SubdbIterator(SubdbIteratorImpl &&base)
+      : SubdbIteratorImpl(std::move(base)) {}
+  SubdbIterator(lmdb::cursor &&cur) : SubdbIteratorImpl(std::move(cur)) {}
+  SubdbIterator(const lmdb::cursor &cur) : SubdbIteratorImpl(cur) {}
+
+  static SubdbIterator create(lmdb::txn &txn, lmdb::dbi &dbi, const Key &key) {
+    return SubdbIteratorImpl::create(txn, dbi, lmdb::to_sv(key));
+  }
+
+  SubdbIterator &operator=(const SubdbIterator &rhs) {
+    copyAssign(rhs);
+    return *this;
+  };
+  template <
+      typename FromKey, typename FromValue,
+      std::enable_if_t<IsBindable<FromKey, Key> && IsBindable<FromValue, Value>,
+                       bool> = true>
+  SubdbIterator &operator=(const SubdbIterator<FromKey, FromValue> &rhs) {
+    copyAssign(rhs);
+    return *this;
+  }
+
+  SubdbIterator &operator=(SubdbIterator &&rhs) {
+    moveAssign(std::move(rhs));
+    return *this;
+  }
+  template <
+      typename FromKey, typename FromValue,
+      std::enable_if_t<IsBindable<FromKey, Key> && IsBindable<FromValue, Value>,
+                       bool> = true>
+  SubdbIterator &operator=(SubdbIterator<FromKey, FromValue> &&rhs) {
+    moveAssign(std::move(rhs));
+    return *this;
+  }
+
+  operator bool() { return SubdbIteratorImpl::is_end(); }
+
+  const value_type &operator*() { return *current(); }
+  const value_type *operator->() { return current(); }
+
+  SubdbIterator &operator--() {
+    prev();
+    return *this;
+  }
+  SubdbIterator &operator++() {
+    next();
+    return *this;
+  }
+  const value_type *current() {
+    return reinterpret_cast<const value_type *>(
+        SubdbIteratorImpl::current().data());
+  }
+
+private:
+  template <typename, typename> friend struct SubdbContainer;
+
+  template <
+      typename FromKey, typename FromValue,
+      std::enable_if_t<IsBindable<FromKey, Key> && IsBindable<FromValue, Value>,
+                       bool> = true>
+  void copyAssign(const SubdbIterator<FromKey, FromValue> &rhs) {
+    SubdbIteratorImpl::copyAssign(rhs);
+  }
+
+  template <
+      typename FromKey, typename FromValue,
+      std::enable_if_t<IsBindable<FromKey, Key> && IsBindable<FromValue, Value>,
+                       bool> = true>
+  void moveAssign(SubdbIterator<FromKey, FromValue> &&rhs) {
+    SubdbIteratorImpl::moveAssign(std::move(rhs));
+  }
+};
+
+template <typename KeyType, typename ValueType> struct SubdbContainer {
+  SubdbContainer(lmdb::txn &txn, lmdb::dbi &dbi, const KeyType &key) {
+    auto cur = lmdb::cursor::open(txn, dbi);
+    if (std::string_view k = lmdb::to_sv(key); !cur.get(k, MDB_SET))
+      return;
+    base_cursor = std::move(cur);
+  }
+  template <typename FromKey, typename FromValue,
+            std::enable_if_t<IsBindable<FromKey, KeyType> &&
+                                 IsBindable<FromValue, ValueType>,
+                             bool> = true>
+  SubdbContainer(SubdbContainer<FromKey, FromValue> &&it) {
+    base_cursor = std::move(it.base_cursor);
+  }
+
+  SubdbContainer &operator=(const SubdbContainer &rhs) {
+    copyAssign(rhs);
+    return *this;
+  };
+  template <typename FromKey, typename FromValue,
+            std::enable_if_t<IsBindable<FromKey, KeyType> &&
+                                 IsBindable<FromValue, ValueType>,
+                             bool> = true>
+  SubdbContainer &operator=(const SubdbContainer<FromKey, FromValue> &rhs) {
+    copyAssign(rhs);
+    return *this;
+  }
+
+  SubdbContainer &operator=(SubdbContainer &&rhs) {
+    moveAssign(std::move(rhs));
+    return *this;
+  }
+  template <typename FromKey, typename FromValue,
+            std::enable_if_t<IsBindable<FromKey, KeyType> &&
+                                 IsBindable<FromValue, ValueType>,
+                             bool> = true>
+  SubdbContainer &operator=(SubdbContainer<FromKey, FromValue> &&rhs) {
+    moveAssign(std::move(rhs));
+    return *this;
+  }
+
+  SubdbIterator<KeyType, ValueType> begin() {
+    return SubdbIterator<KeyType, ValueType>(base_cursor);
+  }
+
+  SubdbIterator<KeyType, ValueType> end() { return end_iterator; }
+
+  size_t size() { return base_cursor.count(); }
+
+private:
+  template <typename, typename> friend struct SubdbContainer;
+
+  template <typename FromKey, typename FromValue,
+            std::enable_if_t<IsBindable<FromKey, KeyType> &&
+                                 IsBindable<FromValue, ValueType>,
+                             bool> = true>
+  void copyAssign(const SubdbIterator<FromKey, FromValue> &rhs) {
+    if (this == static_cast<const void *>(&rhs))
+      return;
+    base_cursor = rhs.base_cursor;
+  }
+
+  template <typename FromKey, typename FromValue,
+            std::enable_if_t<IsBindable<FromKey, KeyType> &&
+                                 IsBindable<FromValue, ValueType>,
+                             bool> = true>
+  void moveAssign(SubdbIterator<FromKey, FromValue> &&rhs) {
+    if (this == static_cast<const void *>(&rhs))
+      return;
+    std::swap(base_cursor, rhs.base_cursor);
+  }
+
+  lmdb::cursor base_cursor{nullptr};
+  SubdbIterator<KeyType, ValueType> end_iterator;
+};
+
+namespace cista_types = cista::offset;
+
+struct FileDef {
+  struct IndexInclude {
+    int line = 0;
+    cista_types::cstring resolved_path;
+  };
+  cista_types::cstring path;
+  cista_types::vector<cista_types::cstring> args;
+  LanguageId language;
+  // Includes in the file.
+  cista_types::vector<IndexInclude> includes;
+  // Parts of the file which are disabled.
+  cista_types::vector<Range> skipped_ranges;
+  // Used by |$ccls/reload|.
+  cista_types::vector<cista_types::cstring> dependencies;
+  // modification time of the file recorded
+  int64_t mtime = 0;
+};
+
+struct QueryFile {
+  using Def = FileDef;
+  using DefUpdate = std::pair<FileDef, std::string>;
 
   int id = -1;
-  std::optional<Def> def;
+  cista::optional<Def> def;
   // `extent` is valid => declaration; invalid => regular reference
-  llvm::DenseMap<ExtentRef, int> symbol2refcnt;
+  cista_types::hash_map<ExtentRef, int> symbol2refcnt;
+};
+REFLECT_UNDERLYING_B(SymbolKind);
+
+struct alignas(16) EntityID {
+  Kind kind;
+  Usr usr;
+};
+inline EntityID makeEntityID(Kind kind, Usr usr) {
+  EntityID id;
+  id.kind = kind;
+  id.usr = usr;
+  return id;
+}
+
+struct alignas(32) QueryEntity {
+  EntityID id;
+  Usr usr;
+  Kind kind;
 };
 
-template <typename Q, typename QDef> struct QueryEntity {
-  using Def = QDef;
-  Def *anyDef() {
-    Def *ret = nullptr;
-    for (auto &i : static_cast<Q *>(this)->def) {
-      ret = &i;
-      if (i.spell)
-        break;
-    }
-    return ret;
-  }
-  const Def *anyDef() const {
-    return const_cast<QueryEntity *>(this)->anyDef();
+struct alignas(16) QueryEntityDef {
+  // General metadata.
+  cista_types::cstring detailed_name;
+  cista_types::cstring hover;
+  cista_types::cstring comments;
+  Maybe<DeclRef> spell;
+
+  int file_id = -1;
+  int16_t qual_name_offset = 0;
+  int16_t short_name_offset = 0;
+  int16_t short_name_size = 0;
+
+  SymbolKind kind = SymbolKind::Unknown;
+  SymbolKind parent_kind = SymbolKind::Unknown;
+
+  auto cista_members() {
+    return std::tie(detailed_name, hover, comments,
+                    static_cast<Ref &>(spell.storage), spell.storage.file_id,
+                    spell.storage.extent, file_id, qual_name_offset,
+                    short_name_offset, short_name_size, kind, parent_kind);
   }
 };
+
+struct alignas(16) QueryFuncDef : QueryEntityDef, NameMixin<QueryFuncDef> {
+  // Method this method overrides.
+  cista_types::vector<Usr> bases;
+  // Local variables or parameters.
+  cista_types::vector<Usr> vars;
+  // Functions that this function calls.
+  cista_types::vector<SymbolRef> callees;
+
+  uint8_t storage = clang::SC_None;
+
+  auto cista_members() {
+    return std::tie(static_cast<QueryEntityDef &>(*this), bases, vars, callees,
+                    storage);
+  }
+};
+
+struct alignas(16) QueryTypeDef : QueryEntityDef, NameMixin<QueryTypeDef> {
+  cista_types::vector<Usr> bases;
+  // Types, functions, and variables defined in this type.
+  cista_types::vector<Usr> funcs;
+  cista_types::vector<Usr> types;
+  cista_types::vector<std::pair<Usr, int64_t>> vars;
+
+  // If set, then this is the same underlying type as the given value (ie, this
+  // type comes from a using or typedef statement).
+  Usr alias_of = 0;
+
+  auto cista_members() {
+    return std::tie(static_cast<QueryEntityDef &>(*this), bases, funcs, types,
+                    vars, alias_of);
+  }
+};
+
+struct alignas(16) QueryVarDef : QueryEntityDef, NameMixin<QueryVarDef> {
+  cista_types::vector<Usr> bases;
+  // Type of the variable.
+  Usr type = 0;
+  // Note a variable may have instances of both |None| and |Extern|
+  // (declaration).
+  uint8_t storage = clang::SC_None;
+
+  bool is_local() const {
+    return spell &&
+           (parent_kind == SymbolKind::Function ||
+            parent_kind == SymbolKind::Method ||
+            parent_kind == SymbolKind::StaticMethod ||
+            parent_kind == SymbolKind::Constructor) &&
+           (storage == clang::SC_None || storage == clang::SC_Auto ||
+            storage == clang::SC_Register);
+  }
+
+  auto cista_members() {
+    return std::tie(static_cast<QueryEntityDef &>(*this), bases, type, storage);
+  }
+};
+
+template <typename _EntityType, typename QDef>
+struct QueryObject : QueryEntity {
+  using EntityType = _EntityType;
+  using Def = QDef;
+
+  SubdbContainer<EntityID, Def> defContainer(const DB &db) const;
+  SubdbContainer<EntityID, DeclRef> declContainer(const DB &db) const;
+  SubdbContainer<EntityID, Use> useContainer(const DB &db) const;
+
+  const Def *getFirstDef(const DB &db) const;
+  const Def *getAnyDef(const DB &db) const;
+};
+
+struct QueryFunc : QueryObject<QueryFunc, QueryFuncDef> {
+  SubdbContainer<EntityID, Usr> derivedContainer(const DB &db) const;
+};
+struct QueryType : QueryObject<QueryType, QueryTypeDef> {
+  SubdbContainer<EntityID, Usr> derivedContainer(const DB &db) const;
+  SubdbContainer<EntityID, Usr> instanceContainer(const DB &db) const;
+};
+struct QueryVar : QueryObject<QueryVar, QueryVarDef> {};
+
+template <typename _T> static constexpr Kind DefToKind() {
+  using T = typename std::remove_cv_t<std::remove_reference_t<_T>>;
+  if constexpr (std::is_same_v<T, QueryFunc::Def>)
+    return Kind::Func;
+  else if constexpr (std::is_same_v<T, QueryType::Def>)
+    return Kind::Type;
+  else if constexpr (std::is_same_v<T, QueryVar::Def>)
+    return Kind::Var;
+}
+
+template <Kind kind> struct KindToEntity {};
+template <> struct KindToEntity<Kind::Func> {
+  using type = QueryFunc;
+};
+template <> struct KindToEntity<Kind::Type> {
+  using type = QueryType;
+};
+template <> struct KindToEntity<Kind::Var> {
+  using type = QueryVar;
+};
+template <Kind kind> using QueryEntityType = typename KindToEntity<kind>::type;
 
 template <typename T>
 using Update =
     std::unordered_map<Usr, std::pair<std::vector<T>, std::vector<T>>>;
-
-struct QueryFunc : QueryEntity<QueryFunc, FuncDef<Vec>> {
-  Usr usr;
-  llvm::SmallVector<Def, 1> def;
-  std::vector<DeclRef> declarations;
-  std::vector<Usr> derived;
-  std::vector<Use> uses;
-};
-
-struct QueryType : QueryEntity<QueryType, TypeDef<Vec>> {
-  Usr usr;
-  llvm::SmallVector<Def, 1> def;
-  std::vector<DeclRef> declarations;
-  std::vector<Usr> derived;
-  std::vector<Usr> instances;
-  std::vector<Use> uses;
-};
-
-struct QueryVar : QueryEntity<QueryVar, VarDef> {
-  Usr usr;
-  llvm::SmallVector<Def, 1> def;
-  std::vector<DeclRef> declarations;
-  std::vector<Use> uses;
-};
 
 struct IndexUpdate {
   // Creates a new IndexUpdate based on the delta from previous to current. If
@@ -109,16 +488,16 @@ struct IndexUpdate {
 
   // Function updates.
   int funcs_hint;
-  std::vector<std::pair<Usr, QueryFunc::Def>> funcs_removed;
-  std::vector<std::pair<Usr, QueryFunc::Def>> funcs_def_update;
+  std::vector<std::pair<Usr, QueryFuncDef>> funcs_removed;
+  std::vector<std::pair<Usr, QueryFuncDef>> funcs_def_update;
   Update<DeclRef> funcs_declarations;
   Update<Use> funcs_uses;
   Update<Usr> funcs_derived;
 
   // Type updates.
   int types_hint;
-  std::vector<std::pair<Usr, QueryType::Def>> types_removed;
-  std::vector<std::pair<Usr, QueryType::Def>> types_def_update;
+  std::vector<std::pair<Usr, QueryTypeDef>> types_removed;
+  std::vector<std::pair<Usr, QueryTypeDef>> types_def_update;
   Update<DeclRef> types_declarations;
   Update<Use> types_uses;
   Update<Usr> types_derived;
@@ -126,8 +505,8 @@ struct IndexUpdate {
 
   // Variable updates.
   int vars_hint;
-  std::vector<std::pair<Usr, QueryVar::Def>> vars_removed;
-  std::vector<std::pair<Usr, QueryVar::Def>> vars_def_update;
+  std::vector<std::pair<Usr, QueryVarDef>> vars_removed;
+  std::vector<std::pair<Usr, QueryVarDef>> vars_def_update;
   Update<DeclRef> vars_declarations;
   Update<Use> vars_uses;
 };
@@ -141,63 +520,280 @@ struct DenseMapInfoForUsr {
 
 using Lid2file_id = std::unordered_map<int, int>;
 
-// The query database is heavily optimized for fast queries. It is stored
-// in-memory.
+struct QueryStore {
+  QueryStore() : env(nullptr) {}
+  QueryStore(std::string_view store_path);
+
+  void increaseMapSize();
+
+private:
+  friend struct DB;
+  friend struct TxnManager;
+  friend struct QueryFunc;
+  friend struct QueryType;
+  friend struct QueryVar;
+  friend int CompareDataInObjectsDBI(MDB_txn *txn, void *txn_ctx,
+                                     const MDB_val *a, const MDB_val *b);
+
+  lmdb::env env;
+
+  lmdb::dbi dbi_files;
+  lmdb::dbi dbi_name2file_id;
+
+  //
+  // Entities database:
+  //
+  // There are one main database plus 5 properties databases:
+  // - entities: QueryEntity storage
+  // - entities_def: QueryFunc/QueryType/QueryVar definition storage. Value is
+  //                 Query*Def
+  // - entities_declarations: QueryFunc/QueryType/QueryVar declaration storage.
+  //                          Value is DeclRef
+  // - entities_derived: QueryFunc/QueryType derived storage. Value is Usr.
+  // - entities_instances: QueryType derived storage. Value is Usr.
+  // - entities_uses: QueryFunc/QueryType/QueryVar derived storage. Value is
+  //                  Use.
+  //
+  lmdb::dbi entities;
+  lmdb::dbi entities_defs;
+  lmdb::dbi entities_declarations;
+  lmdb::dbi entities_derived;
+  lmdb::dbi entities_instances;
+  lmdb::dbi entities_uses;
+  lmdb::dbi kind_to_entity_id;
+};
+
 struct DB {
-  std::vector<QueryFile> files;
-  llvm::StringMap<int> name2file_id;
-  llvm::DenseMap<Usr, int, DenseMapInfoForUsr> func_usr, type_usr, var_usr;
-  llvm::SmallVector<QueryFunc, 0> funcs;
-  llvm::SmallVector<QueryType, 0> types;
-  llvm::SmallVector<QueryVar, 0> vars;
+  DB(QueryStoreConnection qs, lmdb::txn &txn) : qs(qs), txn(txn) {}
 
   void clear();
-
-  template <typename Def>
-  void removeUsrs(Kind kind, int file_id,
-                  const std::vector<std::pair<Usr, Def>> &to_remove);
   // Insert the contents of |update| into |db|.
   void applyIndexUpdate(IndexUpdate *update);
-  int getFileId(const std::string &path);
-  int update(QueryFile::DefUpdate &&u);
-  void update(const Lid2file_id &, int file_id,
-              std::vector<std::pair<Usr, QueryType::Def>> &&us);
-  void update(const Lid2file_id &, int file_id,
-              std::vector<std::pair<Usr, QueryFunc::Def>> &&us);
-  void update(const Lid2file_id &, int file_id,
-              std::vector<std::pair<Usr, QueryVar::Def>> &&us);
-  std::string_view getSymbolName(SymbolIdx sym, bool qualified);
-  std::vector<uint8_t> getFileSet(const std::vector<std::string> &folders);
 
-  bool hasFunc(Usr usr) const { return func_usr.count(usr); }
-  bool hasType(Usr usr) const { return type_usr.count(usr); }
-  bool hasVar(Usr usr) const { return var_usr.count(usr); }
+  void populateVFS(VFS *vfs) const;
 
-  QueryFunc &getFunc(Usr usr) { return funcs[func_usr[usr]]; }
-  QueryType &getType(Usr usr) { return types[type_usr[usr]]; }
-  QueryVar &getVar(Usr usr) { return vars[var_usr[usr]]; }
+  std::optional<int> findFileId(const std::string &path) const;
+  std::string getSymbolName(SymbolIdx sym, bool qualified) const;
+  std::vector<uint8_t>
+  getFileSet(const std::vector<std::string> &folders) const;
 
-  QueryFile &getFile(SymbolIdx ref) { return files[ref.usr]; }
-  QueryFunc &getFunc(SymbolIdx ref) { return getFunc(ref.usr); }
-  QueryType &getType(SymbolIdx ref) { return getType(ref.usr); }
-  QueryVar &getVar(SymbolIdx ref) { return getVar(ref.usr); }
+  bool hasEntityId(Kind kind, Usr usr) const;
+  bool hasFunc(Usr usr) const { return hasEntityId(Kind::Func, usr); }
+  bool hasType(Usr usr) const { return hasEntityId(Kind::Type, usr); }
+  bool hasVar(Usr usr) const { return hasEntityId(Kind::Var, usr); }
+
+  const QueryEntity &id2Entity(EntityID id) const;
+  template <typename EntityType> const auto &id2Entity(EntityID id) const {
+    return static_cast<const EntityType &>(id2Entity(id));
+  }
+  const QueryFunc &id2Func(EntityID id) const {
+    return id2Entity<QueryFunc>(id);
+  }
+  const QueryType &id2Type(EntityID id) const {
+    return id2Entity<QueryType>(id);
+  }
+  const QueryVar &id2Var(EntityID id) const { return id2Entity<QueryVar>(id); }
+
+  const QueryFunc &getFunc(Usr usr) const {
+    return id2Func(makeEntityID(Kind::Func, usr));
+  }
+  const QueryType &getType(Usr usr) const {
+    return id2Type(makeEntityID(Kind::Type, usr));
+  }
+  const QueryVar &getVar(Usr usr) const {
+    return id2Var(makeEntityID(Kind::Var, usr));
+  }
+
+  const QueryFile &getFile(int file_id) const;
+  const QueryFunc &getFunc(SymbolIdx ref) const { return getFunc(ref.usr); }
+  const QueryType &getType(SymbolIdx ref) const { return getType(ref.usr); }
+  const QueryVar &getVar(SymbolIdx ref) const { return getVar(ref.usr); }
+
+  int files_count() const { return qs->dbi_files.size(txn); }
+  template <Kind kind> uint64_t entities_count() const {
+    lmdb::cursor cur = lmdb::cursor::open(txn, qs->kind_to_entity_id);
+    std::string_view k = lmdb::to_sv(kind);
+    if (!cur.get(k, MDB_SET))
+      return 0;
+    return cur.count();
+  }
+  uint64_t funcs_count() const { return entities_count<Kind::Func>(); }
+  uint64_t types_count() const { return entities_count<Kind::Type>(); }
+  uint64_t vars_count() const { return entities_count<Kind::Var>(); }
+
+  void foreachFile(std::function<bool(const QueryFile &)> &) const;
+  template <typename Fn> void foreachFile(Fn &&fn) const {
+    std::function<bool(const QueryFile &)> erasure =
+        [&](const QueryFile &f) -> bool { return fn(f); };
+    foreachFile(erasure);
+  }
+
+  SubdbContainer<EntityID, QueryEntityDef>
+  entityDefContainer(const QueryEntity &entity) const;
+  SubdbContainer<EntityID, DeclRef>
+  entityDeclContainer(const QueryEntity &entity) const;
+  SubdbContainer<EntityID, Usr>
+  entityDerivedContainer(const QueryEntity &entity) const;
+  SubdbContainer<EntityID, Usr>
+  entityInstanceContainer(const QueryEntity &entity) const;
+  SubdbContainer<EntityID, Use>
+  entityUseContainer(const QueryEntity &entity) const;
+
+  SubdbContainer<Kind, EntityID> allUsrContainer(Kind kind) const {
+    return SubdbContainer<Kind, EntityID>(txn, qs->kind_to_entity_id, kind);
+  }
+
+  template <typename ET> const auto *entityGetFirstDef(ET &&entity) const;
+  template <typename ET> const auto *entityGetAnyDef(ET &&entity) const;
+
+private:
+  int getFileId(std::string_view path);
+  void putFile(int file_id, QueryFile &file);
+
+  template <typename ET, typename Def> void insertEntityDef(ET &&e, Def &&def);
+
+  template <Kind kind>
+  std::pair<QueryEntityType<kind>, bool> idPutEntity(Usr usr);
+  std::pair<QueryEntity, bool> idPutEntity(Kind kind, Usr usr);
+
+  void idRemoveEntity(SubdbIterator<EntityID, QueryEntity> &&);
+
+  template <typename Def>
+  void removeUsrs(int file_id,
+                  const std::vector<std::pair<Usr, Def>> &to_remove);
+
+  int update(std::unordered_map<int, QueryFile> &, QueryFile::DefUpdate &&u);
+  void update(std::unordered_map<int, QueryFile> &, const Lid2file_id &,
+              int file_id, std::vector<std::pair<Usr, QueryFunc::Def>> &&us);
+  void update(std::unordered_map<int, QueryFile> &, const Lid2file_id &,
+              int file_id, std::vector<std::pair<Usr, QueryType::Def>> &&us);
+  void update(std::unordered_map<int, QueryFile> &, const Lid2file_id &,
+              int file_id, std::vector<std::pair<Usr, QueryVar::Def>> &&us);
+
+  friend struct QueryStore;
+  friend struct QueryFunc;
+  friend struct QueryType;
+  friend struct QueryVar;
+
+  QueryStoreConnection qs;
+  lmdb::txn &txn;
 };
+
+struct TxnManager {
+  static TxnManager begin(QueryStoreConnection qs, bool read_only) {
+    TxnManager Result;
+    std::unique_ptr<lmdb::txn> txn = std::make_unique<lmdb::txn>(nullptr);
+    std::unique_ptr<DB> dbptr = std::make_unique<DB>(qs, *txn);
+    do {
+      try {
+        *txn = lmdb::txn::begin(qs->env, nullptr, read_only ? MDB_RDONLY : 0);
+      } catch (const lmdb::runtime_error &e) {
+        if (e.code() != MDB_MAP_RESIZED)
+          throw;
+        qs->env.set_mapsize(0);
+      }
+    } while (txn->handle() == nullptr);
+    Result.qs = qs;
+    Result.txn = std::move(txn);
+    Result._db = std::move(dbptr);
+    return Result;
+  }
+
+  void commit() {
+    txn->commit();
+    _db.reset();
+  }
+
+  void abort() noexcept {
+    txn->abort();
+    _db.reset();
+  }
+
+  DB *db() { return _db ? _db.get() : nullptr; }
+
+private:
+  QueryStoreConnection qs;
+  std::unique_ptr<lmdb::txn> txn;
+  std::unique_ptr<DB> _db;
+};
+
+template <typename _EntityType, typename QDef>
+auto QueryObject<_EntityType, QDef>::defContainer(const DB &db) const
+    -> SubdbContainer<EntityID, Def> {
+  return db.entityDefContainer(static_cast<const EntityType &>(*this));
+}
+
+template <typename _EntityType, typename QDef>
+SubdbContainer<EntityID, DeclRef>
+QueryObject<_EntityType, QDef>::declContainer(const DB &db) const {
+  return db.entityDeclContainer(static_cast<const EntityType &>(*this));
+}
+
+template <typename _EntityType, typename QDef>
+SubdbContainer<EntityID, Use>
+QueryObject<_EntityType, QDef>::useContainer(const DB &db) const {
+  return db.entityUseContainer(static_cast<const EntityType &>(*this));
+}
+
+template <typename _EntityType, typename QDef>
+const QDef *QueryObject<_EntityType, QDef>::getFirstDef(const DB &db) const {
+  return db.entityGetFirstDef(static_cast<const EntityType &>(*this));
+}
+
+template <typename _EntityType, typename QDef>
+const QDef *QueryObject<_EntityType, QDef>::getAnyDef(const DB &db) const {
+  return db.entityGetAnyDef(static_cast<const EntityType &>(*this));
+}
+
+template <typename ET> const auto *DB::entityGetFirstDef(ET &&entity) const {
+  auto defs = entity.defContainer(*this);
+  auto it = defs.begin();
+  return &*it;
+}
+
+template <typename ET> const auto *DB::entityGetAnyDef(ET &&entity) const {
+  using _ET = typename std::remove_cv_t<std::remove_reference_t<ET>>;
+  const typename _ET::Def *ret = nullptr;
+  allOf(entity.defContainer(*this), [&](auto &&def) {
+    ret = &def;
+    if (ret->spell)
+      return false;
+    return true;
+  });
+  return ret;
+}
 
 Maybe<DeclRef> getDefinitionSpell(DB *db, SymbolIdx sym);
 
 // Get defining declaration (if exists) or an arbitrary declaration (otherwise)
 // for each id.
-std::vector<Use> getFuncDeclarations(DB *, const std::vector<Usr> &);
-std::vector<Use> getFuncDeclarations(DB *, const Vec<Usr> &);
-std::vector<Use> getTypeDeclarations(DB *, const std::vector<Usr> &);
-std::vector<DeclRef> getVarDeclarations(DB *, const std::vector<Usr> &,
+std::vector<Use> getFuncDeclarations(DB *, llvm::ArrayRef<Usr>);
+std::vector<Use> getTypeDeclarations(DB *, llvm::ArrayRef<Usr>);
+std::vector<DeclRef> getVarDeclarations(DB *, llvm::ArrayRef<Usr>, unsigned);
+
+std::vector<Use> getFuncDeclarations(DB *, SubdbContainer<EntityID, Usr> &);
+std::vector<Use> getTypeDeclarations(DB *, SubdbContainer<EntityID, Usr> &);
+std::vector<DeclRef> getVarDeclarations(DB *, SubdbContainer<EntityID, Usr> &,
                                         unsigned);
+inline std::vector<Use>
+getFuncDeclarations(DB *db, SubdbContainer<EntityID, Usr> &&decls) {
+  return getFuncDeclarations(db, decls);
+}
+inline std::vector<Use>
+getTypeDeclarations(DB *db, SubdbContainer<EntityID, Usr> &&decls) {
+  return getTypeDeclarations(db, decls);
+}
+inline std::vector<DeclRef>
+getVarDeclarations(DB *db, SubdbContainer<EntityID, Usr> &&decls,
+                   unsigned kind) {
+  return getVarDeclarations(db, decls, kind);
+}
 
 // Get non-defining declarations.
-std::vector<DeclRef> &getNonDefDeclarations(DB *db, SymbolIdx sym);
+std::vector<DeclRef> getNonDefDeclarations(DB *db, SymbolIdx sym);
 
-std::vector<Use> getUsesForAllBases(DB *db, QueryFunc &root);
-std::vector<Use> getUsesForAllDerived(DB *db, QueryFunc &root);
+std::vector<Use> getUsesForAllBases(DB *db, const QueryFunc &root);
+std::vector<Use> getUsesForAllDerived(DB *db, const QueryFunc &root);
 std::optional<lsRange> getLsRange(WorkingFile *working_file,
                                   const Range &location);
 DocumentUri getLsDocumentUri(DB *db, int file_id, std::string *path);
@@ -213,8 +809,27 @@ std::optional<SymbolInformation> getSymbolInfo(DB *db, SymbolIdx sym,
                                                bool detailed);
 
 std::vector<SymbolRef> findSymbolsAtLocation(WorkingFile *working_file,
-                                             QueryFile *file, Position &ls_pos,
+                                             const QueryFile *file,
+                                             Position &ls_pos,
                                              bool smallest = false);
+
+template <typename ContainerType, typename Fn>
+bool allOf(ContainerType &&container, Fn &&fn) {
+  for (auto it = std::begin(container), end_it = std::end(container);
+       it != end_it; ++it) {
+    if (!fn(*it))
+      return false;
+  }
+  return true;
+}
+
+template <typename ContainerType, typename Fn>
+void forEach(ContainerType &&container, Fn &&fn) {
+  allOf(std::forward<ContainerType>(container), [&fn](auto &&it) {
+    fn(std::forward<decltype(it)>(it));
+    return true;
+  });
+}
 
 template <typename Fn> void withEntity(DB *db, SymbolIdx sym, Fn &&fn) {
   switch (sym.kind) {
@@ -235,23 +850,24 @@ template <typename Fn> void withEntity(DB *db, SymbolIdx sym, Fn &&fn) {
 
 template <typename Fn> void eachEntityDef(DB *db, SymbolIdx sym, Fn &&fn) {
   withEntity(db, sym, [&](const auto &entity) {
-    for (auto &def : entity.def)
+    allOf(entity.defContainer(*db), [&fn](auto &&def) {
       if (!fn(def))
-        break;
+        return false;
+      return true;
+    });
   });
 }
 
 template <typename Fn>
 void eachOccurrence(DB *db, SymbolIdx sym, bool include_decl, Fn &&fn) {
   withEntity(db, sym, [&](const auto &entity) {
-    for (Use use : entity.uses)
-      fn(use);
+    forEach(entity.useContainer(*db), [&fn](auto &&use) { fn(use); });
     if (include_decl) {
-      for (auto &def : entity.def)
+      forEach(entity.defContainer(*db), [&fn](auto &&def) {
         if (def.spell)
           fn(*def.spell);
-      for (Use use : entity.declarations)
-        fn(use);
+      });
+      forEach(entity.declContainer(*db), [&fn](auto &&dr) { fn(dr); });
     }
   });
 }
@@ -259,11 +875,12 @@ void eachOccurrence(DB *db, SymbolIdx sym, bool include_decl, Fn &&fn) {
 SymbolKind getSymbolKind(DB *db, SymbolIdx sym);
 
 template <typename C, typename Fn>
-void eachDefinedFunc(DB *db, const C &usrs, Fn &&fn) {
-  for (Usr usr : usrs) {
-    auto &obj = db->getFunc(usr);
-    if (!obj.def.empty())
+void eachDefinedFunc(DB *db, C &&usrs, Fn &&fn) {
+  forEach(usrs, [&](auto usr) {
+    const auto &obj = db->getFunc(usr);
+    if (obj.defContainer(*db).size() != 0)
       fn(obj);
-  }
+  });
 }
+
 } // namespace ccls

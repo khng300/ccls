@@ -31,15 +31,17 @@ REFLECT_STRUCT(DocumentHighlight, range, kind, role);
 
 void MessageHandler::textDocument_documentHighlight(
     TextDocumentPositionParam &param, ReplyOnce &reply) {
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
   int file_id;
   auto [file, wf] =
-      findOrFail(param.textDocument.uri.getPath(), reply, &file_id);
+      findOrFail(db, param.textDocument.uri.getPath(), reply, &file_id);
   if (!wf)
     return;
 
   std::vector<DocumentHighlight> result;
   std::vector<SymbolRef> syms =
-      findSymbolsAtLocation(wf, file, param.position, true);
+      findSymbolsAtLocation(wf, &*file, param.position, true);
   for (auto [sym, refcnt] : file->symbol2refcnt) {
     if (refcnt <= 0)
       continue;
@@ -76,13 +78,15 @@ REFLECT_STRUCT(DocumentLink, range, target);
 
 void MessageHandler::textDocument_documentLink(TextDocumentParam &param,
                                                ReplyOnce &reply) {
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
+  auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply);
   if (!wf)
     return;
 
   std::vector<DocumentLink> result;
   int column;
-  for (const IndexInclude &include : file->def->includes)
+  for (const QueryFile::Def::IndexInclude &include : file->def->includes)
     if (std::optional<int> bline =
             wf->getBufferPosFromIndexPos(include.line, &column, false)) {
       const std::string &line = wf->buffer_lines[*bline];
@@ -132,12 +136,14 @@ template <> bool ignore(const QueryVar::Def *def) {
 
 void MessageHandler::textDocument_documentSymbol(JsonReader &reader,
                                                  ReplyOnce &reply) {
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
   DocumentSymbolParam param;
   reflect(reader, param);
 
   int file_id;
   auto [file, wf] =
-      findOrFail(param.textDocument.uri.getPath(), reply, &file_id, true);
+      findOrFail(db, param.textDocument.uri.getPath(), reply, &file_id, true);
   if (!file)
     return;
   auto allows = [&](SymbolRef sym) { return !(sym.role & param.excludeRole); };
@@ -160,8 +166,9 @@ void MessageHandler::textDocument_documentSymbol(JsonReader &reader,
     for (auto [sym, refcnt] : file->symbol2refcnt)
       if (refcnt > 0 && sym.extent.valid())
         syms.push_back(sym);
-    // Global variables `int i, j, k;` have the same extent.start. Sort them by
-    // range.start instead. In case of a tie, prioritize the widest ExtentRef.
+    // Global variables `int i, j, k;` have the same extent.start. Sort them
+    // by range.start instead. In case of a tie, prioritize the widest
+    // ExtentRef.
     std::sort(syms.begin(), syms.end(),
               [](const ExtentRef &lhs, const ExtentRef &rhs) {
                 return std::tie(lhs.range.start, rhs.extent.end) <
@@ -184,14 +191,15 @@ void MessageHandler::textDocument_documentSymbol(JsonReader &reader,
             ds->range = *range1;
       }
       withEntity(db, sym, [&](const auto &entity) {
-        const auto *def = entity.anyDef();
+        auto def = db->entityGetAnyDef(entity);
         if (!def)
           return;
         ds->name = def->name(false);
         ds->detail = def->detailed_name;
         ds->kind = def->kind;
 
-        if (!ignore(def) && (ds->kind == SymbolKind::Namespace || allows(sym))) {
+        if (!ignore(def) &&
+            (ds->kind == SymbolKind::Namespace || allows(sym))) {
           // Drop scopes which are before selectionRange.start. In
           // `int i, j, k;`, the scope of i will be ended by j.
           while (!scopes.empty() &&
@@ -214,8 +222,10 @@ void MessageHandler::textDocument_documentSymbol(JsonReader &reader,
         continue;
       if (std::optional<SymbolInformation> info =
               getSymbolInfo(db, sym, false)) {
-        if ((sym.kind == Kind::Type && ignore(db->getType(sym).anyDef())) ||
-            (sym.kind == Kind::Var && ignore(db->getVar(sym).anyDef())))
+        if ((sym.kind == Kind::Type &&
+             ignore(db->entityGetAnyDef(db->getType(sym)))) ||
+            (sym.kind == Kind::Var &&
+             ignore(db->entityGetAnyDef(db->getVar(sym)))))
           continue;
         if (auto loc = getLsLocation(db, wfiles, sym, file_id)) {
           info->location = *loc;
