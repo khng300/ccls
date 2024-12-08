@@ -29,13 +29,17 @@ struct ReferenceParam : public TextDocumentPositionParam {
   Role role = Role::None;
 };
 REFLECT_STRUCT(ReferenceParam::Context, includeDeclaration);
-REFLECT_STRUCT(ReferenceParam, textDocument, position, context, folders, base, excludeRole, role);
+REFLECT_STRUCT(ReferenceParam, textDocument, position, context, folders, base,
+               excludeRole, role);
 } // namespace
 
-void MessageHandler::textDocument_references(JsonReader &reader, ReplyOnce &reply) {
+void MessageHandler::textDocument_references(JsonReader &reader,
+                                             ReplyOnce &reply) {
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
   ReferenceParam param;
   reflect(reader, param);
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+  auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply);
   if (!wf)
     return;
 
@@ -47,7 +51,7 @@ void MessageHandler::textDocument_references(JsonReader &reader, ReplyOnce &repl
   std::unordered_set<Use> seen_uses;
   int line = param.position.line;
 
-  for (SymbolRef sym : findSymbolsAtLocation(wf, file, param.position)) {
+  for (SymbolRef sym : findSymbolsAtLocation(wf, &*file, param.position)) {
     // Found symbol. Return references.
     std::unordered_set<Usr> seen;
     seen.insert(sym.usr);
@@ -58,32 +62,38 @@ void MessageHandler::textDocument_references(JsonReader &reader, ReplyOnce &repl
       sym.usr = stack.back();
       stack.pop_back();
       auto fn = [&](Use use, SymbolKind parent_kind) {
-        if (file_set[use.file_id] && Role(use.role & param.role) == param.role && !(use.role & param.excludeRole) &&
-            seen_uses.insert(use).second)
+        if (file_set[use.file_id] &&
+            Role(use.role & param.role) == param.role &&
+            !(use.role & param.excludeRole) && seen_uses.insert(use).second)
           if (auto loc = getLsLocation(db, wfiles, use))
             result.push_back(*loc);
       };
       withEntity(db, sym, [&](const auto &entity) {
         SymbolKind parent_kind = SymbolKind::Unknown;
-        for (auto &def : entity.def)
+        allOf(entity.defContainer(*db), [&](const auto &def) {
           if (def.spell) {
             parent_kind = getSymbolKind(db, sym);
             if (param.base)
-              for (Usr usr : make_range(def.bases_begin(), def.bases_end()))
+              for (Usr usr : def.bases)
                 if (!seen.count(usr)) {
                   seen.insert(usr);
                   stack.push_back(usr);
                 }
-            break;
+            return false;
           }
-        for (Use use : entity.uses)
+          return true;
+        });
+        forEach(entity.useContainer(*db), [&](auto use) {
           fn(use, parent_kind);
+        });
         if (param.context.includeDeclaration) {
-          for (auto &def : entity.def)
+          forEach(entity.defContainer(*db), [&](const auto &def) {
             if (def.spell)
               fn(*def.spell, parent_kind);
-          for (Use use : entity.declarations)
-            fn(use, parent_kind);
+          });
+          forEach(entity.declContainer(*db), [&](auto dr) {
+            fn(dr, parent_kind);
+          });
         }
       });
     }
@@ -97,15 +107,16 @@ void MessageHandler::textDocument_references(JsonReader &reader, ReplyOnce &repl
     std::string path;
     if (line == 0 || line >= (int)wf->buffer_lines.size() - 1)
       path = file->def->path;
-    for (const IndexInclude &include : file->def->includes)
+    for (const QueryFile::Def::IndexInclude &include : file->def->includes)
       if (include.line == param.position.line) {
         path = include.resolved_path;
         break;
       }
-    if (path.size())
-      for (QueryFile &file1 : db->files)
+    if (path.size()) {
+      for (const auto &file1 : db->filesContainer()) {
         if (file1.def)
-          for (const IndexInclude &include : file1.def->includes)
+          for (const QueryFile::Def::IndexInclude &include :
+               file1.def->includes)
             if (include.resolved_path == path) {
               // Another file |file1| has the same include line.
               Location &loc = result.emplace_back();
@@ -113,6 +124,8 @@ void MessageHandler::textDocument_references(JsonReader &reader, ReplyOnce &repl
               loc.range.start.line = loc.range.end.line = include.line;
               break;
             }
+      };
+    }
   }
 
   if ((int)result.size() >= g_config->xref.maxNum)

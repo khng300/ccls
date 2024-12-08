@@ -29,25 +29,34 @@ struct DocumentHighlight {
   // ccls extension
   Role role = Role::None;
 
-  bool operator<(const DocumentHighlight &o) const { return !(range == o.range) ? range < o.range : kind < o.kind; }
+  bool operator<(const DocumentHighlight &o) const {
+    return !(range == o.range) ? range < o.range : kind < o.kind;
+  }
 };
 REFLECT_STRUCT(DocumentHighlight, range, kind, role);
 } // namespace
 
-void MessageHandler::textDocument_documentHighlight(TextDocumentPositionParam &param, ReplyOnce &reply) {
+void MessageHandler::textDocument_documentHighlight(
+    TextDocumentPositionParam &param, ReplyOnce &reply) {
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
   int file_id;
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply, &file_id);
+  auto [file, wf] =
+      findOrFail(db, param.textDocument.uri.getPath(), reply, &file_id);
   if (!wf)
     return;
 
   std::vector<DocumentHighlight> result;
-  std::vector<SymbolRef> syms = findSymbolsAtLocation(wf, file, param.position, true);
+  std::vector<SymbolRef> syms =
+      findSymbolsAtLocation(wf, &*file, param.position, true);
   for (auto [sym, refcnt] : file->symbol2refcnt) {
     if (refcnt <= 0)
       continue;
     Usr usr = sym.usr;
     Kind kind = sym.kind;
-    if (std::none_of(syms.begin(), syms.end(), [&](auto &sym1) { return usr == sym1.usr && kind == sym1.kind; }))
+    if (std::none_of(syms.begin(), syms.end(), [&](auto &sym1) {
+          return usr == sym1.usr && kind == sym1.kind;
+        }))
       continue;
     if (auto loc = getLsLocation(db, wfiles, sym, file_id)) {
       DocumentHighlight highlight;
@@ -74,20 +83,24 @@ struct DocumentLink {
 REFLECT_STRUCT(DocumentLink, range, target);
 } // namespace
 
-void MessageHandler::textDocument_documentLink(TextDocumentParam &param, ReplyOnce &reply) {
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+void MessageHandler::textDocument_documentLink(TextDocumentParam &param,
+                                               ReplyOnce &reply) {
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
+  auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply);
   if (!wf)
     return;
 
   std::vector<DocumentLink> result;
   int column;
-  for (const IndexInclude &include : file->def->includes)
-    if (std::optional<int> bline = wf->getBufferPosFromIndexPos(include.line, &column, false)) {
+  for (const QueryFile::Def::IndexInclude &include : file->def->includes)
+    if (std::optional<int> bline =
+            wf->getBufferPosFromIndexPos(include.line, &column, false)) {
       const std::string &line = wf->buffer_lines[*bline];
       auto start = line.find_first_of("\"<"), end = line.find_last_of("\">");
       if (start < end)
-        result.push_back(
-            {lsRange{{*bline, (int)start + 1}, {*bline, (int)end}}, DocumentUri::fromPath(include.resolved_path)});
+        result.push_back({lsRange{{*bline, (int)start + 1}, {*bline, (int)end}},
+                          DocumentUri::fromPath(include.resolved_path)});
     }
   reply(result);
 } // namespace ccls
@@ -95,12 +108,14 @@ void MessageHandler::textDocument_documentLink(TextDocumentParam &param, ReplyOn
 namespace {
 struct DocumentSymbolParam : TextDocumentParam {
   // Include sym if `!(sym.role & excludeRole)`.
-  Role excludeRole = Role((int)Role::All - (int)Role::Definition - (int)Role::Declaration - (int)Role::Dynamic);
+  Role excludeRole = Role((int)Role::All - (int)Role::Definition -
+                          (int)Role::Declaration - (int)Role::Dynamic);
   // If >= 0, return Range[] instead of SymbolInformation[] to reduce output.
   int startLine = -1;
   int endLine = -1;
 };
-REFLECT_STRUCT(DocumentSymbolParam, textDocument, excludeRole, startLine, endLine);
+REFLECT_STRUCT(DocumentSymbolParam, textDocument, excludeRole, startLine,
+               endLine);
 
 struct DocumentSymbol {
   std::string name;
@@ -111,20 +126,31 @@ struct DocumentSymbol {
   std::vector<std::unique_ptr<DocumentSymbol>> children;
 };
 void reflect(JsonWriter &vis, std::unique_ptr<DocumentSymbol> &v);
-REFLECT_STRUCT(DocumentSymbol, name, detail, kind, range, selectionRange, children);
-void reflect(JsonWriter &vis, std::unique_ptr<DocumentSymbol> &v) { reflect(vis, *v); }
+REFLECT_STRUCT(DocumentSymbol, name, detail, kind, range, selectionRange,
+               children);
+void reflect(JsonWriter &vis, std::unique_ptr<DocumentSymbol> &v) {
+  reflect(vis, *v);
+}
 
 template <typename Def> bool ignore(const Def *def) { return false; }
-template <> bool ignore(const QueryType::Def *def) { return !def || def->kind == SymbolKind::TypeParameter; }
-template <> bool ignore(const QueryVar::Def *def) { return !def || def->is_local(); }
+template <> bool ignore(const QueryType::Def *def) {
+  return !def || def->kind == SymbolKind::TypeParameter;
+}
+template <> bool ignore(const QueryVar::Def *def) {
+  return !def || def->is_local();
+}
 } // namespace
 
-void MessageHandler::textDocument_documentSymbol(JsonReader &reader, ReplyOnce &reply) {
+void MessageHandler::textDocument_documentSymbol(JsonReader &reader,
+                                                 ReplyOnce &reply) {
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
   DocumentSymbolParam param;
   reflect(reader, param);
 
   int file_id;
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply, &file_id, true);
+  auto [file, wf] =
+      findOrFail(db, param.textDocument.uri.getPath(), reply, &file_id, true);
   if (!file)
     return;
   auto allows = [&](SymbolRef sym) { return !(sym.role & param.excludeRole); };
@@ -133,7 +159,8 @@ void MessageHandler::textDocument_documentSymbol(JsonReader &reader, ReplyOnce &
     std::vector<lsRange> result;
     for (auto [sym, refcnt] : file->symbol2refcnt) {
       if (refcnt <= 0 || !allows(sym) ||
-          !(param.startLine <= sym.range.start.line && sym.range.start.line <= param.endLine))
+          !(param.startLine <= sym.range.start.line &&
+            sym.range.start.line <= param.endLine))
         continue;
       if (auto loc = getLsLocation(db, wfiles, sym, file_id))
         result.push_back(loc->range);
@@ -146,11 +173,14 @@ void MessageHandler::textDocument_documentSymbol(JsonReader &reader, ReplyOnce &
     for (auto [sym, refcnt] : file->symbol2refcnt)
       if (refcnt > 0 && sym.extent.valid())
         syms.push_back(sym);
-    // Global variables `int i, j, k;` have the same extent.start. Sort them by
-    // range.start instead. In case of a tie, prioritize the widest ExtentRef.
-    std::sort(syms.begin(), syms.end(), [](const ExtentRef &lhs, const ExtentRef &rhs) {
-      return std::tie(lhs.range.start, rhs.extent.end) < std::tie(rhs.range.start, lhs.extent.end);
-    });
+    // Global variables `int i, j, k;` have the same extent.start. Sort them
+    // by range.start instead. In case of a tie, prioritize the widest
+    // ExtentRef.
+    std::sort(syms.begin(), syms.end(),
+              [](const ExtentRef &lhs, const ExtentRef &rhs) {
+                return std::tie(lhs.range.start, rhs.extent.end) <
+                       std::tie(rhs.range.start, lhs.extent.end);
+              });
 
     std::vector<std::unique_ptr<DocumentSymbol>> res;
     std::vector<DocumentSymbol *> scopes;
@@ -163,21 +193,24 @@ void MessageHandler::textDocument_documentSymbol(JsonReader &reader, ReplyOnce &
         // `name` for spell, do the check as selectionRange must be a subrange
         // of range.
         if (sym.extent.valid())
-          if (auto range1 = getLsRange(wf, sym.extent); range1 && range1->includes(*range))
+          if (auto range1 = getLsRange(wf, sym.extent);
+              range1 && range1->includes(*range))
             ds->range = *range1;
       }
       withEntity(db, sym, [&](const auto &entity) {
-        const auto *def = entity.anyDef();
+        auto def = db->entityGetAnyDef(entity);
         if (!def)
           return;
         ds->name = def->name(false);
         ds->detail = def->detailed_name;
         ds->kind = def->kind;
 
-        if (!ignore(def) && (ds->kind == SymbolKind::Namespace || allows(sym))) {
+        if (!ignore(def) &&
+            (ds->kind == SymbolKind::Namespace || allows(sym))) {
           // Drop scopes which are before selectionRange.start. In
           // `int i, j, k;`, the scope of i will be ended by j.
-          while (!scopes.empty() && scopes.back()->range.end <= ds->selectionRange.start)
+          while (!scopes.empty() &&
+                 scopes.back()->range.end <= ds->selectionRange.start)
             scopes.pop_back();
           auto *ds1 = ds.get();
           if (scopes.empty())
@@ -194,9 +227,12 @@ void MessageHandler::textDocument_documentSymbol(JsonReader &reader, ReplyOnce &
     for (auto [sym, refcnt] : file->symbol2refcnt) {
       if (refcnt <= 0 || !allows(sym))
         continue;
-      if (std::optional<SymbolInformation> info = getSymbolInfo(db, sym, false)) {
-        if ((sym.kind == Kind::Type && ignore(db->getType(sym).anyDef())) ||
-            (sym.kind == Kind::Var && ignore(db->getVar(sym).anyDef())))
+      if (std::optional<SymbolInformation> info =
+              getSymbolInfo(db, sym, false)) {
+        if ((sym.kind == Kind::Type &&
+             ignore(db->entityGetAnyDef(db->getType(sym)))) ||
+            (sym.kind == Kind::Var &&
+             ignore(db->entityGetAnyDef(db->getVar(sym)))))
           continue;
         if (auto loc = getLsLocation(db, wfiles, sym, file_id)) {
           info->location = *loc;
@@ -209,9 +245,9 @@ void MessageHandler::textDocument_documentSymbol(JsonReader &reader, ReplyOnce &
 }
 
 void MessageHandler::textDocument_switchSourceHeader(TextDocumentIdentifier &param, ReplyOnce &reply) {
-  QueryFile *file;
-  WorkingFile *wf;
-  std::tie(file, wf) = findOrFail(param.uri.getPath(), reply);
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
+  auto [file, wf] = findOrFail(db, param.uri.getPath(), reply);
   if (!wf)
     return reply(JsonNull{});
   int file_id = file->id;
@@ -230,7 +266,7 @@ void MessageHandler::textDocument_switchSourceHeader(TextDocumentIdentifier &par
 
     if (is_hdr) {
       withEntity(db, sym, [&](const auto &entity) {
-        for (auto &def : entity.def)
+        for (const auto &def : entity.defContainer(*db))
           if (def.spell && def.file_id != file_id)
             ++file_id2cnt[def.file_id];
       });
@@ -245,27 +281,27 @@ void MessageHandler::textDocument_switchSourceHeader(TextDocumentIdentifier &par
     for (auto it = file_id2cnt.begin(); it != file_id2cnt.end(); ++it)
       if (it->second > best->second || (it->second == best->second && it->first < best->first))
         best = it;
-    if (auto &def = db->files[best->first].def)
+    if (auto &def = db->getFile(best->first).def)
       return reply(DocumentUri::fromPath(def->path));
   }
 
   if (is_hdr) {
     // Check if `path` is in a #include entry.
-    for (QueryFile &file1 : db->files) {
-      auto &def = file1.def;
+    for (const auto &file1 : db->filesContainer()) {
+      const auto &def = file1.def;
       if (!def || lookupExtension(def->path).second)
         continue;
-      for (IndexInclude &include : def->includes)
-        if (path == include.resolved_path)
+      for (const auto &include : def->includes)
+        if (path == std::string_view(include.resolved_path))
           return reply(DocumentUri::fromPath(def->path));
-    }
+    };
     return reply(JsonNull{});
   }
 
   // Otherwise, find the #include with the same stem.
   StringRef stem = sys::path::stem(path);
-  for (IndexInclude &include : file->def->includes)
-    if (sys::path::stem(include.resolved_path) == stem)
+  for (const auto &include : file->def->includes)
+    if (sys::path::stem(std::string_view(include.resolved_path)) == stem)
       return reply(DocumentUri::fromPath(std::string(include.resolved_path)));
   reply(JsonNull{});
 }

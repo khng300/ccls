@@ -58,9 +58,9 @@ private:
 };
 
 struct WorkingFiles {
-  WorkingFile *getFile(const std::string &path);
-  WorkingFile *getFileUnlocked(const std::string &path);
-  std::string getContent(const std::string &path);
+  WorkingFile *getFile(std::string_view path);
+  WorkingFile *getFileUnlocked(std::string_view path);
+  std::string getContent(std::string_view path);
 
   template <typename Fn> void withLock(Fn &&fn) {
     std::lock_guard lock(mutex);

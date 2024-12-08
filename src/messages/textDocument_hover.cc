@@ -42,34 +42,37 @@ const char *languageIdentifier(LanguageId lang) {
 }
 
 // Returns the hover or detailed name for `sym`, if any.
-std::pair<std::optional<MarkedString>, std::optional<MarkedString>> getHover(DB *db, LanguageId lang, SymbolRef sym,
-                                                                             int file_id) {
+std::pair<std::optional<MarkedString>, std::optional<MarkedString>>
+getHover(DB *db, LanguageId lang, SymbolRef sym, int file_id) {
   const char *comments = nullptr;
   std::optional<MarkedString> ls_comments, hover;
   withEntity(db, sym, [&](const auto &entity) {
-    for (auto &d : entity.def) {
-      if (!comments && d.comments[0])
-        comments = d.comments;
+    allOf(entity.defContainer(*db), [&](const auto &d) {
+      if (!comments && d.comments.size())
+        comments = d.comments.data();
       if (d.spell) {
-        if (d.comments[0])
-          comments = d.comments;
-        if (const char *s = d.hover[0] ? d.hover : d.detailed_name[0] ? d.detailed_name : nullptr) {
+        if (d.comments.size())
+          comments = d.comments.data();
+        if (const char *s = d.hover.size()           ? d.hover.data()
+                            : d.detailed_name.size() ? d.detailed_name.data()
+                                                     : nullptr) {
           if (!hover)
             hover = {languageIdentifier(lang), s};
           else if (strlen(s) > hover->value.size())
             hover->value = s;
         }
         if (d.spell->file_id == file_id)
-          break;
+          return false;
       }
-    }
-    if (!hover && entity.def.size()) {
-      auto &d = entity.def[0];
+      return true;
+    });
+    if (auto def = entity.getFirstDef(*db); !hover && def) {
+      auto &d = *def;
       hover = {languageIdentifier(lang)};
-      if (d.hover[0])
-        hover->value = d.hover;
-      else if (d.detailed_name[0])
-        hover->value = d.detailed_name;
+      if (d.hover.size())
+        hover->value = d.hover.data();
+      else if (d.detailed_name.size())
+        hover->value = d.detailed_name.data();
     }
     if (comments)
       ls_comments = MarkedString{std::nullopt, comments};
@@ -78,14 +81,18 @@ std::pair<std::optional<MarkedString>, std::optional<MarkedString>> getHover(DB 
 }
 } // namespace
 
-void MessageHandler::textDocument_hover(TextDocumentPositionParam &param, ReplyOnce &reply) {
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+void MessageHandler::textDocument_hover(TextDocumentPositionParam &param,
+                                        ReplyOnce &reply) {
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
+  auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply);
   if (!wf)
     return;
 
   Hover result;
-  for (SymbolRef sym : findSymbolsAtLocation(wf, file, param.position)) {
-    std::optional<lsRange> ls_range = getLsRange(wfiles->getFile(file->def->path), sym.range);
+  for (SymbolRef sym : findSymbolsAtLocation(wf, &*file, param.position)) {
+    std::optional<lsRange> ls_range =
+        getLsRange(wfiles->getFile(file->def->path), sym.range);
     if (!ls_range)
       continue;
 

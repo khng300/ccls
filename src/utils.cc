@@ -37,8 +37,8 @@ Matcher::Matcher(const std::string &pattern) : impl(std::make_unique<Impl>()), p
 
 Matcher::~Matcher() {}
 
-bool Matcher::matches(const std::string &text) const {
-  return std::regex_search(text, impl->regex, std::regex_constants::match_any);
+bool Matcher::matches(std::string_view text) const {
+  return std::regex_search(std::string(text), impl->regex, std::regex_constants::match_any);
 }
 
 GroupMatch::GroupMatch(const std::vector<std::string> &whitelist, const std::vector<std::string> &blacklist) {
@@ -64,7 +64,7 @@ GroupMatch::GroupMatch(const std::vector<std::string> &whitelist, const std::vec
   }
 }
 
-bool GroupMatch::matches(const std::string &text, std::string *blacklist_pattern) const {
+bool GroupMatch::matches(std::string_view text, std::string *blacklist_pattern) const {
   for (const Matcher &m : whitelist)
     if (m.matches(text))
       return true;
@@ -89,14 +89,14 @@ uint64_t hashUsr(llvm::StringRef s) {
   return ret;
 }
 
-std::string lowerPathIfInsensitive(const std::string &path) {
+std::string lowerPathIfInsensitive(std::string_view path) {
 #if defined(_WIN32)
   std::string ret = path;
   for (char &c : ret)
     c = tolower(c);
   return ret;
 #else
-  return path;
+  return std::string(path);
 #endif
 }
 

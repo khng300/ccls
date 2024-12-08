@@ -334,19 +334,19 @@ Position WorkingFile::getCompletionPosition(Position pos, std::string *filter) c
   return getPositionForOffset(buffer_content, i);
 }
 
-WorkingFile *WorkingFiles::getFile(const std::string &path) {
+WorkingFile *WorkingFiles::getFile(std::string_view path) {
   std::lock_guard lock(mutex);
   return getFileUnlocked(path);
 }
 
-WorkingFile *WorkingFiles::getFileUnlocked(const std::string &path) {
-  auto it = files.find(path);
+WorkingFile *WorkingFiles::getFileUnlocked(std::string_view path) {
+  auto it = files.find(std::string(path));
   return it != files.end() ? it->second.get() : nullptr;
 }
 
-std::string WorkingFiles::getContent(const std::string &path) {
+std::string WorkingFiles::getContent(std::string_view path) {
   std::lock_guard lock(mutex);
-  auto it = files.find(path);
+  auto it = files.find(std::string(path));
   return it != files.end() ? it->second->buffer_content : "";
 }
 

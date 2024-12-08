@@ -13,7 +13,7 @@ struct Param {
 };
 REFLECT_STRUCT(Param, textDocument, position, direction);
 
-Maybe<Range> findParent(QueryFile *file, Pos pos) {
+Maybe<Range> findParent(const QueryFile *file, Pos pos) {
   Maybe<Range> parent;
   for (auto [sym, refcnt] : file->symbol2refcnt)
     if (refcnt > 0 && sym.extent.valid() && sym.extent.start <= pos && pos < sym.extent.end &&
@@ -25,9 +25,11 @@ Maybe<Range> findParent(QueryFile *file, Pos pos) {
 } // namespace
 
 void MessageHandler::ccls_navigate(JsonReader &reader, ReplyOnce &reply) {
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
   Param param;
   reflect(reader, param);
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+  auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply);
   if (!wf) {
     return;
   }
@@ -40,7 +42,7 @@ void MessageHandler::ccls_navigate(JsonReader &reader, ReplyOnce &reply) {
   Maybe<Range> res;
   switch (param.direction[0]) {
   case 'D': {
-    Maybe<Range> parent = findParent(file, pos);
+    Maybe<Range> parent = findParent(&*file, pos);
     for (auto [sym, refcnt] : file->symbol2refcnt)
       if (refcnt > 0 && pos < sym.extent.start && (!parent || sym.extent.end <= parent->end) &&
           (!res || sym.extent.start < res->start))
@@ -54,7 +56,7 @@ void MessageHandler::ccls_navigate(JsonReader &reader, ReplyOnce &reply) {
         res = sym.extent;
     break;
   case 'R': {
-    Maybe<Range> parent = findParent(file, pos);
+    Maybe<Range> parent = findParent(&*file, pos);
     if (parent && parent->start.line == pos.line && pos < parent->end) {
       pos = parent->end;
       if (pos.column)
