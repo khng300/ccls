@@ -26,19 +26,19 @@ struct Matcher {
   Matcher(const std::string &pattern); // throw
   Matcher(Matcher &&) = default;
   ~Matcher();
-  bool matches(const std::string &text) const;
+  bool matches(std::string_view text) const;
 };
 
 struct GroupMatch {
   std::vector<Matcher> whitelist, blacklist;
 
   GroupMatch(const std::vector<std::string> &whitelist, const std::vector<std::string> &blacklist);
-  bool matches(const std::string &text, std::string *blacklist_pattern = nullptr) const;
+  bool matches(std::string_view text, std::string *blacklist_pattern = nullptr) const;
 };
 
 uint64_t hashUsr(llvm::StringRef s);
 
-std::string lowerPathIfInsensitive(const std::string &path);
+std::string lowerPathIfInsensitive(std::string_view path);
 
 // Ensures that |path| ends in a slash.
 void ensureEndsInSlash(std::string &path);
@@ -89,10 +89,9 @@ std::string getDefaultResourceDirectory();
 
 // Like std::optional, but the stored data is responsible for containing the
 // empty state. T should define a function `bool T::valid()`.
-template <typename T> class Maybe {
+template <typename T> struct Maybe {
   T storage;
 
-public:
   constexpr Maybe() = default;
   Maybe(const Maybe &) = default;
   Maybe(std::nullopt_t) {}
@@ -125,24 +124,4 @@ public:
   bool operator!=(const Maybe &o) const { return !(*this == o); }
 };
 
-template <typename T> struct Vec {
-  std::unique_ptr<T[]> a;
-  int s = 0;
-#if !(__clang__ || __GNUC__ > 7 || __GNUC__ == 7 && __GNUC_MINOR__ >= 4) || defined(_WIN32)
-  // Work around a bug in GCC<7.4 that optional<IndexUpdate> would not be
-  // construtible.
-  Vec() = default;
-  Vec(const Vec &o) : a(std::make_unique<T[]>(o.s)), s(o.s) { std::copy(o.a.get(), o.a.get() + o.s, a.get()); }
-  Vec(Vec &&) = default;
-  Vec &operator=(Vec &&) = default;
-  Vec(std::unique_ptr<T[]> a, int s) : a(std::move(a)), s(s) {}
-#endif
-  const T *begin() const { return a.get(); }
-  T *begin() { return a.get(); }
-  const T *end() const { return a.get() + s; }
-  T *end() { return a.get() + s; }
-  int size() const { return s; }
-  const T &operator[](size_t i) const { return a.get()[i]; }
-  T &operator[](size_t i) { return a.get()[i]; }
-};
 } // namespace ccls

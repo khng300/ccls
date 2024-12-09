@@ -127,6 +127,21 @@ if(LLVM_ENABLE_ZLIB)
   find_package(ZLIB)
 endif()
 
+set(lmdb_SRCDIR third_party/lmdb/libraries/liblmdb)
+add_library(lmdb STATIC
+  ${lmdb_SRCDIR}/mdb.c
+  ${lmdb_SRCDIR}/midl.c)
+target_include_directories(lmdb SYSTEM BEFORE INTERFACE ${lmdb_SRCDIR})
+#target_compile_options(lmdb PRIVATE -O0 -fsanitize=address -fno-sanitize-address-use-after-scope)
+#target_link_options(ccls PRIVATE -fsanitize=address)
+
+target_link_libraries(ccls PRIVATE lmdb)
+target_include_directories(ccls PRIVATE
+  $<TARGET_PROPERTY:lmdb,INTERFACE_INCLUDE_DIRECTORIES>)
+
+add_subdirectory(third_party/cista)
+target_link_libraries(ccls PRIVATE cista)
+
 ### Definitions
 
 # Find Clang resource directory with Clang executable.

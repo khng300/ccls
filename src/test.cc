@@ -288,6 +288,7 @@ bool runIndexTests(const std::string &filter_path, bool enable_update) {
     // Run test.
     g_config = new Config;
     VFS vfs;
+    QueryStoreConnection qs = std::make_shared<QueryStore>("index_test_db");
     WorkingFiles wfiles;
     std::vector<const char *> cargs;
     for (auto &arg : flags)

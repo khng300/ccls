@@ -61,14 +61,18 @@ void format(ReplyOnce &reply, WorkingFile *wfile, tooling::Range range) {
 } // namespace
 
 void MessageHandler::textDocument_formatting(DocumentFormattingParam &param, ReplyOnce &reply) {
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
+  auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply);
   if (!wf)
     return;
   format(reply, wf, {0, (unsigned)wf->buffer_content.size()});
 }
 
 void MessageHandler::textDocument_onTypeFormatting(DocumentOnTypeFormattingParam &param, ReplyOnce &reply) {
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
+  auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply);
   if (!wf) {
     return;
   }
@@ -81,7 +85,9 @@ void MessageHandler::textDocument_onTypeFormatting(DocumentOnTypeFormattingParam
 }
 
 void MessageHandler::textDocument_rangeFormatting(DocumentRangeFormattingParam &param, ReplyOnce &reply) {
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
+  auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply);
   if (!wf) {
     return;
   }
