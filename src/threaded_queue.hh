@@ -72,22 +72,28 @@ struct MultiQueueWaiter {
 // A threadsafe-queue. http://stackoverflow.com/a/16075550
 template <class T> struct ThreadedQueue : public BaseThreadQueue {
 public:
-  ThreadedQueue() {
+  ThreadedQueue(int max_count = unthrottled_count_) {
     owned_waiter_ = std::make_unique<MultiQueueWaiter>();
     waiter_ = owned_waiter_.get();
+    max_count_ = max_count;
   }
-  explicit ThreadedQueue(MultiQueueWaiter *waiter) : waiter_(waiter) {}
+  explicit ThreadedQueue(MultiQueueWaiter *waiter, int max_count = unthrottled_count_)
+      : max_count_(max_count), waiter_(waiter) {}
 
   // Returns the number of elements in the queue. This is lock-free.
   size_t size() const { return total_count_; }
 
+  // Returns whether the queue is a throttled queue
+  bool throttled() const { return max_count_ != unthrottled_count_; }
+
   // Add an element to the queue.
   template <void (std::deque<T>::*Push)(T &&)> void push(T &&t, bool priority) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
     if (priority)
       (priority_.*Push)(std::move(t));
     else
       (queue_.*Push)(std::move(t));
+    waiter_->cv.wait(lock, [&]() { return total_count_ < max_count_; });
     ++total_count_;
     waiter_->cv.notify_one();
   }
@@ -111,6 +117,8 @@ public:
       queue_.pop_front();
     }
 
+    if (throttled())
+      waiter_->cv.notify_one();
     return result;
   }
 
@@ -128,6 +136,8 @@ public:
       auto val = std::move(q->front());
       q->pop_front();
       --total_count_;
+      if (throttled())
+        waiter_->cv.notify_one();
       return val;
     };
     if (!priority_.empty())
@@ -143,6 +153,8 @@ public:
       auto val = std::move(q->front());
       q->pop_front();
       --total_count_;
+      if (throttled())
+        waiter_->cv.notify_one();
       return val;
     };
     if (priority_.size())
@@ -160,7 +172,9 @@ public:
   mutable std::mutex mutex_;
 
 private:
+  static constexpr int unthrottled_count_ = INT_MAX;
   std::atomic<int> total_count_{0};
+  int max_count_;
   std::deque<T> priority_;
   std::deque<T> queue_;
   MultiQueueWaiter *waiter_;

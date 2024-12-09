@@ -22,7 +22,9 @@ struct CodeAction {
 REFLECT_STRUCT(CodeAction, title, kind, edit);
 } // namespace
 void MessageHandler::textDocument_codeAction(CodeActionParam &param, ReplyOnce &reply) {
-  WorkingFile *wf = findOrFail(param.textDocument.uri.getPath(), reply).second;
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
+  WorkingFile *wf = findOrFail(db, param.textDocument.uri.getPath(), reply).second;
   if (!wf)
     return;
   std::vector<CodeAction> result;
@@ -77,7 +79,9 @@ struct CommonCodeLensParams {
 } // namespace
 
 void MessageHandler::textDocument_codeLens(TextDocumentParam &param, ReplyOnce &reply) {
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
+  auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply);
   if (!wf)
     return;
 
@@ -103,35 +107,37 @@ void MessageHandler::textDocument_codeLens(TextDocumentParam &param, ReplyOnce &
       continue;
     switch (sym.kind) {
     case Kind::Func: {
-      QueryFunc &func = db->getFunc(sym);
-      const QueryFunc::Def *def = func.anyDef();
+      const QueryFunc &func = db->getFunc(sym);
+      auto def = func.anyDef();
       if (!def)
         continue;
       std::vector<Use> base_uses = getUsesForAllBases(db, func);
       std::vector<Use> derived_uses = getUsesForAllDerived(db, func);
-      add("ref", {sym.usr, Kind::Func, "uses"}, sym.range, func.uses.size(), base_uses.empty());
+      add("ref", {sym.usr, Kind::Func, "uses"}, sym.range, func.uses().size(), base_uses.empty());
       if (base_uses.size())
         add("b.ref", {sym.usr, Kind::Func, "bases uses"}, sym.range, base_uses.size());
       if (derived_uses.size())
         add("d.ref", {sym.usr, Kind::Func, "derived uses"}, sym.range, derived_uses.size());
       if (base_uses.empty())
         add("base", {sym.usr, Kind::Func, "bases"}, sym.range, def->bases.size());
-      add("derived", {sym.usr, Kind::Func, "derived"}, sym.range, func.derived.size());
+      add("derived", {sym.usr, Kind::Func, "derived"}, sym.range, func.deriveds().size());
       break;
     }
     case Kind::Type: {
-      QueryType &type = db->getType(sym);
-      add("ref", {sym.usr, Kind::Type, "uses"}, sym.range, type.uses.size(), true);
-      add("derived", {sym.usr, Kind::Type, "derived"}, sym.range, type.derived.size());
-      add("var", {sym.usr, Kind::Type, "instances"}, sym.range, type.instances.size());
+      const QueryType &type = db->getType(sym);
+      add("ref", {sym.usr, Kind::Type, "uses"}, sym.range, type.uses().size(), true);
+      add("derived", {sym.usr, Kind::Type, "derived"}, sym.range, type.deriveds().size());
+      add("var", {sym.usr, Kind::Type, "instances"}, sym.range, type.instances().size());
       break;
     }
     case Kind::Var: {
-      QueryVar &var = db->getVar(sym);
-      const QueryVar::Def *def = var.anyDef();
+      const QueryVar &var = db->getVar(sym);
+      auto def = var.anyDef();
+      if (!def)
+        continue;
       if (!def || (def->is_local() && !g_config->codeLens.localVariables))
         continue;
-      add("ref", {sym.usr, Kind::Var, "uses"}, sym.range, var.uses.size(), def->kind != SymbolKind::Macro);
+      add("ref", {sym.usr, Kind::Var, "uses"}, sym.range, var.uses().size(), def->kind != SymbolKind::Macro);
       break;
     }
     case Kind::File:
@@ -144,6 +150,8 @@ void MessageHandler::textDocument_codeLens(TextDocumentParam &param, ReplyOnce &
 }
 
 void MessageHandler::workspace_executeCommand(JsonReader &reader, ReplyOnce &reply) {
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
   Command param;
   reflect(reader, param);
   if (param.arguments.empty()) {
@@ -156,43 +164,46 @@ void MessageHandler::workspace_executeCommand(JsonReader &reader, ReplyOnce &rep
     Cmd_xref cmd;
     reflect(json_reader, cmd);
     std::vector<Location> result;
-    auto map = [&](auto &&uses) {
-      for (auto &use : uses)
+    auto map = [&](auto &&c) {
+      forEach(c, [&](Use use) {
         if (auto loc = getLsLocation(db, wfiles, use))
           result.push_back(std::move(*loc));
+      });
     };
     switch (cmd.kind) {
     case Kind::Func: {
-      QueryFunc &func = db->getFunc(cmd.usr);
+      const QueryFunc &func = db->getFunc(cmd.usr);
       if (cmd.field == "bases") {
-        if (auto *def = func.anyDef())
-          map(getFuncDeclarations(db, def->bases));
+        auto def = func.anyDef();
+        if (def)
+          map(getFuncDeclarations(db, {def->bases.begin(), def->bases.end()}));
       } else if (cmd.field == "bases uses") {
         map(getUsesForAllBases(db, func));
       } else if (cmd.field == "derived") {
-        map(getFuncDeclarations(db, func.derived));
+        map(getFuncDeclarations(db, func.deriveds()));
       } else if (cmd.field == "derived uses") {
         map(getUsesForAllDerived(db, func));
       } else if (cmd.field == "uses") {
-        map(func.uses);
+        map(func.uses());
       }
       break;
     }
     case Kind::Type: {
-      QueryType &type = db->getType(cmd.usr);
+      const QueryType &type = db->getType(cmd.usr);
       if (cmd.field == "derived") {
-        map(getTypeDeclarations(db, type.derived));
+        map(getTypeDeclarations(db, type.deriveds()));
       } else if (cmd.field == "instances") {
-        map(getVarDeclarations(db, type.instances, 7));
+        map(getTypeDeclarations(db, type.instances()));
       } else if (cmd.field == "uses") {
-        map(type.uses);
+        map(type.uses());
       }
       break;
     }
     case Kind::Var: {
-      QueryVar &var = db->getVar(cmd.usr);
-      if (cmd.field == "uses")
-        map(var.uses);
+      const QueryVar &var = db->getVar(cmd.usr);
+      if (cmd.field == "uses") {
+        map(var.uses());
+      }
       break;
     }
     default:
