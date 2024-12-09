@@ -89,6 +89,7 @@ void reflect(JsonReader &vis, unsigned long long &v) { if (!vis.m->IsUint64()) t
 void reflect(JsonReader &vis, double &v            ) { if (!vis.m->IsDouble()) throw std::invalid_argument("double");             v = vis.m->GetDouble(); }
 void reflect(JsonReader &vis, const char *&v       ) { if (!vis.m->IsString()) throw std::invalid_argument("string");             v = intern(vis.getString()); }
 void reflect(JsonReader &vis, std::string &v       ) { if (!vis.m->IsString()) throw std::invalid_argument("string");             v = vis.getString(); }
+void reflect(JsonReader &vis, cista::offset::cstring &v       ) { if (!vis.m->IsString()) throw std::invalid_argument("string");             v = vis.getString(); }
 
 void reflect(JsonWriter &vis, bool &v              ) { vis.m->Bool(v); }
 void reflect(JsonWriter &vis, unsigned char &v     ) { vis.m->Int(v); }
@@ -103,6 +104,7 @@ void reflect(JsonWriter &vis, unsigned long long &v) { vis.m->Uint64(v); }
 void reflect(JsonWriter &vis, double &v            ) { vis.m->Double(v); }
 void reflect(JsonWriter &vis, const char *&v       ) { vis.string(v); }
 void reflect(JsonWriter &vis, std::string &v       ) { vis.string(v.c_str(), v.size()); }
+void reflect(JsonWriter &vis, cista::offset::cstring &v       ) { vis.string(v.data(), v.size()); }
 
 void reflect(BinaryReader &vis, bool &v              ) { v = vis.get<bool>(); }
 void reflect(BinaryReader &vis, unsigned char &v     ) { v = vis.get<unsigned char>(); }
@@ -117,6 +119,7 @@ void reflect(BinaryReader &vis, unsigned long long &v) { v = vis.varUInt(); }
 void reflect(BinaryReader &vis, double &v            ) { v = vis.get<double>(); }
 void reflect(BinaryReader &vis, const char *&v       ) { v = intern(vis.getString()); }
 void reflect(BinaryReader &vis, std::string &v       ) { v = vis.getString(); }
+void reflect(BinaryReader &vis, cista::offset::cstring &v       ) { v = vis.getString(); }
 
 void reflect(BinaryWriter &vis, bool &v              ) { vis.pack(v); }
 void reflect(BinaryWriter &vis, unsigned char &v     ) { vis.pack(v); }
@@ -131,6 +134,7 @@ void reflect(BinaryWriter &vis, unsigned long long &v) { vis.varUInt(v); }
 void reflect(BinaryWriter &vis, double &v            ) { vis.pack(v); }
 void reflect(BinaryWriter &vis, const char *&v       ) { vis.string(v); }
 void reflect(BinaryWriter &vis, std::string &v       ) { vis.string(v.c_str(), v.size()); }
+void reflect(BinaryWriter &vis, cista::offset::cstring &v       ) { vis.string(v.data(), v.size()); }
 // clang-format on
 
 void reflect(JsonWriter &vis, std::string_view &data) {
@@ -229,9 +233,9 @@ template <typename Def> void reflectHoverAndComments(JsonReader &vis, Def &def) 
 }
 template <typename Def> void reflectHoverAndComments(JsonWriter &vis, Def &def) {
   // Don't emit empty hover and comments in JSON test mode.
-  if (!gTestOutputMode || def.hover[0])
+  if (!gTestOutputMode || !std::string_view(def.hover).empty())
     reflectMember(vis, "hover", def.hover);
-  if (!gTestOutputMode || def.comments[0])
+  if (!gTestOutputMode || !std::string_view(def.comments).empty())
     reflectMember(vis, "comments", def.comments);
 }
 template <typename Def> void reflectHoverAndComments(BinaryReader &vis, Def &def) {
@@ -257,7 +261,8 @@ template <typename Def> void reflectShortName(JsonReader &vis, Def &def) {
 }
 template <typename Def> void reflectShortName(JsonWriter &vis, Def &def) {
   if (gTestOutputMode) {
-    std::string_view short_name(def.detailed_name + def.short_name_offset, def.short_name_size);
+    std::string_view short_name(std::string_view(def.detailed_name).data() + def.short_name_offset,
+                                def.short_name_size);
     reflectMember(vis, "short_name", short_name);
   } else {
     reflectMember(vis, "short_name_offset", def.short_name_offset);

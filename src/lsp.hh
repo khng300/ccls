@@ -61,12 +61,12 @@ constexpr char ccls_xref[] = "ccls.xref";
 constexpr char window_showMessage[] = "window/showMessage";
 
 struct DocumentUri {
-  static DocumentUri fromPath(const std::string &path);
+  static DocumentUri fromPath(std::string_view path);
 
   bool operator==(const DocumentUri &o) const { return raw_uri == o.raw_uri; }
   bool operator<(const DocumentUri &o) const { return raw_uri < o.raw_uri; }
 
-  void setPath(const std::string &path);
+  void setPath(std::string_view path);
   std::string getPath() const;
 
   std::string raw_uri;
@@ -157,10 +157,10 @@ enum class SymbolKind : uint8_t {
 };
 
 struct SymbolInformation {
-  std::string_view name;
+  std::string name;
   SymbolKind kind;
   Location location;
-  std::optional<std::string_view> containerName;
+  std::optional<std::string> containerName;
 };
 
 struct TextDocumentIdentifier {
