@@ -35,13 +35,15 @@ REFLECT_STRUCT(DocumentHighlight, range, kind, role);
 } // namespace
 
 void MessageHandler::textDocument_documentHighlight(TextDocumentPositionParam &param, ReplyOnce &reply) {
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
   int file_id;
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply, &file_id);
+  auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply, &file_id);
   if (!wf)
     return;
 
   std::vector<DocumentHighlight> result;
-  std::vector<SymbolRef> syms = findSymbolsAtLocation(wf, file, param.position, true);
+  std::vector<SymbolRef> syms = findSymbolsAtLocation(wf, &*file, param.position, true);
   for (auto [sym, refcnt] : file->symbol2refcnt) {
     if (refcnt <= 0)
       continue;
@@ -75,13 +77,15 @@ REFLECT_STRUCT(DocumentLink, range, target);
 } // namespace
 
 void MessageHandler::textDocument_documentLink(TextDocumentParam &param, ReplyOnce &reply) {
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
+  auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply);
   if (!wf)
     return;
 
   std::vector<DocumentLink> result;
   int column;
-  for (const IndexInclude &include : file->def->includes)
+  for (const QueryFile::Def::IndexInclude &include : file->def->includes)
     if (std::optional<int> bline = wf->getBufferPosFromIndexPos(include.line, &column, false)) {
       const std::string &line = wf->buffer_lines[*bline];
       auto start = line.find_first_of("\"<"), end = line.find_last_of("\">");
@@ -120,11 +124,13 @@ template <> bool ignore(const QueryVar::Def *def) { return !def || def->is_local
 } // namespace
 
 void MessageHandler::textDocument_documentSymbol(JsonReader &reader, ReplyOnce &reply) {
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
   DocumentSymbolParam param;
   reflect(reader, param);
 
   int file_id;
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply, &file_id, true);
+  auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply, &file_id, true);
   if (!file)
     return;
   auto allows = [&](SymbolRef sym) { return !(sym.role & param.excludeRole); };
@@ -146,8 +152,9 @@ void MessageHandler::textDocument_documentSymbol(JsonReader &reader, ReplyOnce &
     for (auto [sym, refcnt] : file->symbol2refcnt)
       if (refcnt > 0 && sym.extent.valid())
         syms.push_back(sym);
-    // Global variables `int i, j, k;` have the same extent.start. Sort them by
-    // range.start instead. In case of a tie, prioritize the widest ExtentRef.
+    // Global variables `int i, j, k;` have the same extent.start. Sort them
+    // by range.start instead. In case of a tie, prioritize the widest
+    // ExtentRef.
     std::sort(syms.begin(), syms.end(), [](const ExtentRef &lhs, const ExtentRef &rhs) {
       return std::tie(lhs.range.start, rhs.extent.end) < std::tie(rhs.range.start, lhs.extent.end);
     });
@@ -167,7 +174,7 @@ void MessageHandler::textDocument_documentSymbol(JsonReader &reader, ReplyOnce &
             ds->range = *range1;
       }
       withEntity(db, sym, [&](const auto &entity) {
-        const auto *def = entity.anyDef();
+        auto def = entity.anyDef(db);
         if (!def)
           return;
         ds->name = def->name(false);
@@ -195,8 +202,8 @@ void MessageHandler::textDocument_documentSymbol(JsonReader &reader, ReplyOnce &
       if (refcnt <= 0 || !allows(sym))
         continue;
       if (std::optional<SymbolInformation> info = getSymbolInfo(db, sym, false)) {
-        if ((sym.kind == Kind::Type && ignore(db->getType(sym).anyDef())) ||
-            (sym.kind == Kind::Var && ignore(db->getVar(sym).anyDef())))
+        if ((sym.kind == Kind::Type && ignore(db->getType(sym).anyDef(db))) ||
+            (sym.kind == Kind::Var && ignore(db->getVar(sym).anyDef(db))))
           continue;
         if (auto loc = getLsLocation(db, wfiles, sym, file_id)) {
           info->location = *loc;
@@ -209,9 +216,9 @@ void MessageHandler::textDocument_documentSymbol(JsonReader &reader, ReplyOnce &
 }
 
 void MessageHandler::textDocument_switchSourceHeader(TextDocumentIdentifier &param, ReplyOnce &reply) {
-  QueryFile *file;
-  WorkingFile *wf;
-  std::tie(file, wf) = findOrFail(param.uri.getPath(), reply);
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
+  auto [file, wf] = findOrFail(db, param.uri.getPath(), reply);
   if (!wf)
     return reply(JsonNull{});
   int file_id = file->id;
@@ -230,7 +237,7 @@ void MessageHandler::textDocument_switchSourceHeader(TextDocumentIdentifier &par
 
     if (is_hdr) {
       withEntity(db, sym, [&](const auto &entity) {
-        for (auto &def : entity.def)
+        for (const auto &def : entity.defs(db))
           if (def.spell && def.file_id != file_id)
             ++file_id2cnt[def.file_id];
       });
@@ -245,27 +252,27 @@ void MessageHandler::textDocument_switchSourceHeader(TextDocumentIdentifier &par
     for (auto it = file_id2cnt.begin(); it != file_id2cnt.end(); ++it)
       if (it->second > best->second || (it->second == best->second && it->first < best->first))
         best = it;
-    if (auto &def = db->files[best->first].def)
+    if (auto &def = db->getFile(best->first).def)
       return reply(DocumentUri::fromPath(def->path));
   }
 
   if (is_hdr) {
     // Check if `path` is in a #include entry.
-    for (QueryFile &file1 : db->files) {
-      auto &def = file1.def;
+    for (const auto &file1 : db->files()) {
+      const auto &def = file1.def;
       if (!def || lookupExtension(def->path).second)
         continue;
-      for (IndexInclude &include : def->includes)
-        if (path == include.resolved_path)
+      for (const auto &include : def->includes)
+        if (path == std::string_view(include.resolved_path))
           return reply(DocumentUri::fromPath(def->path));
-    }
+    };
     return reply(JsonNull{});
   }
 
   // Otherwise, find the #include with the same stem.
   StringRef stem = sys::path::stem(path);
-  for (IndexInclude &include : file->def->includes)
-    if (sys::path::stem(include.resolved_path) == stem)
+  for (const auto &include : file->def->includes)
+    if (sys::path::stem(std::string_view(include.resolved_path)) == stem)
       return reply(DocumentUri::fromPath(std::string(include.resolved_path)));
   reply(JsonNull{});
 }

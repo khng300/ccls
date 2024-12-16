@@ -201,7 +201,6 @@ REFLECT_STRUCT(Position, line, character);
 REFLECT_STRUCT(lsRange, start, end);
 REFLECT_STRUCT(Location, uri, range);
 REFLECT_STRUCT(LocationLink, targetUri, targetRange, targetSelectionRange);
-REFLECT_UNDERLYING_B(SymbolKind);
 REFLECT_STRUCT(TextDocumentIdentifier, uri);
 REFLECT_STRUCT(TextDocumentItem, uri, languageId, version, text);
 REFLECT_STRUCT(TextEdit, range, newText);
@@ -235,7 +234,7 @@ struct ReplyOnce {
 
 struct MessageHandler {
   SemaManager *manager = nullptr;
-  DB *db = nullptr;
+  QueryStoreConnection qs = nullptr;
   Project *project = nullptr;
   VFS *vfs = nullptr;
   WorkingFiles *wfiles = nullptr;
@@ -246,9 +245,10 @@ struct MessageHandler {
 
   MessageHandler();
   void run(InMessage &msg);
-  QueryFile *findFile(const std::string &path, int *out_file_id = nullptr);
-  std::pair<QueryFile *, WorkingFile *> findOrFail(const std::string &path, ReplyOnce &reply,
-                                                   int *out_file_id = nullptr, bool allow_unopened = false);
+  std::optional<QueryFile> findFile(DB *db, const std::string &path, int *out_file_id = nullptr);
+  std::pair<std::optional<QueryFile>, WorkingFile *> findOrFail(DB *db, const std::string &path, ReplyOnce &reply,
+                                                                int *out_file_id = nullptr,
+                                                                bool allow_unopened = false);
 
 private:
   void bind(const char *method, void (MessageHandler::*handler)(JsonReader &));
@@ -303,7 +303,7 @@ private:
   void workspace_symbol(WorkspaceSymbolParam &, ReplyOnce &);
 };
 
-void emitSkippedRanges(WorkingFile *wfile, QueryFile &file);
+void emitSkippedRanges(WorkingFile *wfile, const QueryFile &file);
 
-void emitSemanticHighlight(DB *db, WorkingFile *wfile, QueryFile &file);
+void emitSemanticHighlight(DB *db, WorkingFile *wfile, const QueryFile &file);
 } // namespace ccls

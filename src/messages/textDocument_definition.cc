@@ -10,14 +10,16 @@
 
 namespace ccls {
 void MessageHandler::textDocument_declaration(TextDocumentPositionParam &param, ReplyOnce &reply) {
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
   int file_id;
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply, &file_id);
+  auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply, &file_id);
   if (!wf)
     return;
 
   std::vector<LocationLink> result;
   Position &ls_pos = param.position;
-  for (SymbolRef sym : findSymbolsAtLocation(wf, file, param.position))
+  for (SymbolRef sym : findSymbolsAtLocation(wf, &*file, param.position))
     for (DeclRef dr : getNonDefDeclarations(db, sym))
       if (!(dr.file_id == file_id && dr.range.contains(ls_pos.line, ls_pos.character)))
         if (auto loc = getLocationLink(db, wfiles, dr))
@@ -26,8 +28,10 @@ void MessageHandler::textDocument_declaration(TextDocumentPositionParam &param, 
 }
 
 void MessageHandler::textDocument_definition(TextDocumentPositionParam &param, ReplyOnce &reply) {
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
   int file_id;
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply, &file_id);
+  auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply, &file_id);
   if (!wf)
     return;
 
@@ -35,7 +39,7 @@ void MessageHandler::textDocument_definition(TextDocumentPositionParam &param, R
   Maybe<DeclRef> on_def;
   Position &ls_pos = param.position;
 
-  for (SymbolRef sym : findSymbolsAtLocation(wf, file, ls_pos, true)) {
+  for (SymbolRef sym : findSymbolsAtLocation(wf, &*file, ls_pos, true)) {
     // Special cases which are handled:
     //  - symbol has declaration but no definition (ie, pure virtual)
     //  - goto declaration while in definition of recursive type
@@ -71,7 +75,7 @@ void MessageHandler::textDocument_definition(TextDocumentPositionParam &param, R
   if (result.empty()) {
     Maybe<Range> range;
     // Check #include
-    for (const IndexInclude &include : file->def->includes) {
+    for (const QueryFile::Def::IndexInclude &include : file->def->includes) {
       if (include.line == ls_pos.line) {
         result.push_back({DocumentUri::fromPath(include.resolved_path).raw_uri});
         range = {{0, 0}, {0, 0}};
@@ -97,8 +101,8 @@ void MessageHandler::textDocument_definition(TextDocumentPositionParam &param, R
       SymbolIdx best_sym;
       best_sym.kind = Kind::Invalid;
       auto fn = [&](SymbolIdx sym) {
-        std::string_view short_name = db->getSymbolName(sym, false),
-                         name = short_query.size() < query.size() ? db->getSymbolName(sym, true) : short_name;
+        std::string short_name = db->getSymbolName(sym, false),
+                    name = short_query.size() < query.size() ? db->getSymbolName(sym, true) : short_name;
         if (short_name != short_query)
           return;
         if (Maybe<DeclRef> dr = getDefinitionSpell(db, sym)) {
@@ -117,13 +121,18 @@ void MessageHandler::textDocument_definition(TextDocumentPositionParam &param, R
           }
         }
       };
-      for (auto &func : db->funcs)
+      forEach(db->allUsrs(Kind::Func), [&](const auto id) {
+        const auto &func = db->id2Func(id);
         fn({func.usr, Kind::Func});
-      for (auto &type : db->types)
+      });
+      forEach(db->allUsrs(Kind::Type), [&](const auto id) {
+        const auto &type = db->id2Type(id);
         fn({type.usr, Kind::Type});
-      for (auto &var : db->vars)
-        if (var.def.size() && !var.def[0].is_local())
-          fn({var.usr, Kind::Var});
+      });
+      forEach(db->allUsrs(Kind::Var), [&](const auto id) {
+        const auto &var = db->id2Var(id);
+        fn({var.usr, Kind::Var});
+      });
 
       if (best_sym.kind != Kind::Invalid) {
         Maybe<DeclRef> dr = getDefinitionSpell(db, best_sym);
@@ -138,35 +147,44 @@ void MessageHandler::textDocument_definition(TextDocumentPositionParam &param, R
 }
 
 void MessageHandler::textDocument_typeDefinition(TextDocumentPositionParam &param, ReplyOnce &reply) {
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
+  auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply);
   if (!file)
     return;
 
   std::vector<LocationLink> result;
   auto add = [&](const QueryType &type) {
-    for (const auto &def : type.def)
+    forEach(type.defs(db), [&](const auto &def) {
       if (def.spell)
         if (auto loc = getLocationLink(db, wfiles, *def.spell))
           result.push_back(loc);
-    if (result.empty())
-      for (const DeclRef &dr : type.declarations)
+    });
+    if (result.empty()) {
+      forEach(type.decls(db), [&](auto dr) {
         if (auto loc = getLocationLink(db, wfiles, dr))
           result.push_back(loc);
+      });
+    }
   };
-  for (SymbolRef sym : findSymbolsAtLocation(wf, file, param.position)) {
+  for (SymbolRef sym : findSymbolsAtLocation(wf, &*file, param.position)) {
     switch (sym.kind) {
     case Kind::Var: {
-      const QueryVar::Def *def = db->getVar(sym).anyDef();
+      const QueryVar &var = db->getVar(sym);
+      auto def = var.anyDef(db);
       if (def && def->type)
         add(db->getType(def->type));
       break;
     }
     case Kind::Type: {
-      for (auto &def : db->getType(sym).def)
+      const QueryType &type = db->getType(sym);
+      allOf(type.defs(db), [&](const auto &def) {
         if (def.alias_of) {
           add(db->getType(def.alias_of));
-          break;
+          return false;
         }
+        return true;
+      });
       break;
     }
     default:
