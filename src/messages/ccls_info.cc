@@ -8,7 +8,8 @@
 
 namespace ccls {
 REFLECT_STRUCT(IndexInclude, line, resolved_path);
-REFLECT_STRUCT(QueryFile::Def, path, args, language, dependencies, includes, skipped_ranges);
+REFLECT_STRUCT(FileDef::IndexInclude, line, resolved_path);
+REFLECT_STRUCT(FileDef, path, args, language, dependencies, includes, skipped_ranges);
 
 namespace {
 struct Out_cclsInfo {
@@ -30,10 +31,12 @@ REFLECT_STRUCT(Out_cclsInfo, db, pipeline, project);
 
 void MessageHandler::ccls_info(EmptyParam &, ReplyOnce &reply) {
   Out_cclsInfo result;
-  result.db.files = db->files.size();
-  result.db.funcs = db->funcs.size();
-  result.db.types = db->types.size();
-  result.db.vars = db->vars.size();
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
+  result.db.files = db->files().size();
+  result.db.funcs = db->allUsrs(Kind::Func).size();
+  result.db.types = db->allUsrs(Kind::Type).size();
+  result.db.vars = db->allUsrs(Kind::Var).size();
   result.pipeline.lastIdle = pipeline::stats.last_idle;
   result.pipeline.completed = pipeline::stats.completed;
   result.pipeline.enqueued = pipeline::stats.enqueued;
@@ -52,23 +55,35 @@ struct FileInfoParam : TextDocumentParam {
 REFLECT_STRUCT(FileInfoParam, textDocument, dependencies, includes, skipped_ranges);
 
 void MessageHandler::ccls_fileInfo(JsonReader &reader, ReplyOnce &reply) {
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
   FileInfoParam param;
   reflect(reader, param);
-  QueryFile *file = findFile(param.textDocument.uri.getPath());
+  auto file = findFile(db, param.textDocument.uri.getPath());
   if (!file)
     return;
 
-  QueryFile::Def result;
+  FileDef result;
+  const QueryFile::Def &o = *file->def;
   // Expose some fields of |QueryFile::Def|.
-  result.path = file->def->path;
-  result.args = file->def->args;
-  result.language = file->def->language;
-  if (param.dependencies)
-    result.dependencies = file->def->dependencies;
+  result.path = o.path;
+  std::for_each(o.args.begin(), o.args.end(), [&result](const auto &m) { result.args.emplace_back(m.data()); });
+  result.language = o.language;
   if (param.includes)
-    result.includes = file->def->includes;
+    for (const auto &m : o.includes) {
+      [&result](const auto &m) {
+        FileDef::IndexInclude def;
+        def.line = m.line;
+        def.resolved_path = m.resolved_path.data();
+        result.includes.emplace_back(def);
+      }(m);
+    }
   if (param.skipped_ranges)
-    result.skipped_ranges = file->def->skipped_ranges;
+    std::for_each(o.skipped_ranges.begin(), o.skipped_ranges.end(),
+                  [&result](const auto &m) { result.skipped_ranges.emplace_back(m); });
+  if (param.dependencies)
+    std::for_each(o.dependencies.begin(), o.dependencies.end(),
+                  [&result](const auto &m) { result.dependencies.emplace_back(m.data()); });
   reply(result);
 }
 } // namespace ccls

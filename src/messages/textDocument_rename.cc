@@ -19,7 +19,7 @@ WorkspaceEdit buildWorkspaceEdit(DB *db, WorkingFiles *wfiles, SymbolRef sym, st
 
   eachOccurrence(db, sym, true, [&](Use use) {
     int file_id = use.file_id;
-    QueryFile &file = db->files[file_id];
+    const QueryFile &file = db->getFile(file_id);
     if (!file.def || !edited[file_id].insert(use.range).second)
       return;
     std::optional<Location> loc = getLsLocation(db, wfiles, use);
@@ -29,9 +29,8 @@ WorkspaceEdit buildWorkspaceEdit(DB *db, WorkingFiles *wfiles, SymbolRef sym, st
     auto [it, inserted] = path2edit.try_emplace(file_id);
     auto &edit = it->second.second;
     if (inserted) {
-      const std::string &path = file.def->path;
-      edit.textDocument.uri = DocumentUri::fromPath(path);
-      if ((it->second.first = wfiles->getFile(path)))
+      edit.textDocument.uri = DocumentUri::fromPath(file.def->path);
+      if ((it->second.first = wfiles->getFile(file.def->path)))
         edit.textDocument.version = it->second.first->version;
     }
     // TODO LoadIndexedContent if wf is nullptr.
@@ -52,12 +51,14 @@ WorkspaceEdit buildWorkspaceEdit(DB *db, WorkingFiles *wfiles, SymbolRef sym, st
 } // namespace
 
 void MessageHandler::textDocument_rename(RenameParam &param, ReplyOnce &reply) {
-  auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
+  auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply);
   if (!wf)
     return;
   WorkspaceEdit result;
 
-  for (SymbolRef sym : findSymbolsAtLocation(wf, file, param.position)) {
+  for (SymbolRef sym : findSymbolsAtLocation(wf, &*file, param.position)) {
     result =
         buildWorkspaceEdit(db, wfiles, sym, lexIdentifierAroundPos(param.position, wf->buffer_content), param.newName);
     break;

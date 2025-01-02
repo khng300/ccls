@@ -62,9 +62,10 @@ struct Out_outgoingCall {
 };
 REFLECT_STRUCT(Out_outgoingCall, to, fromRanges);
 
-bool expand(MessageHandler *m, Out_cclsCall *entry, bool callee, CallType call_type, bool qualified, int levels) {
-  const QueryFunc &func = m->db->getFunc(entry->usr);
-  const QueryFunc::Def *def = func.anyDef();
+bool expand(MessageHandler *m, DB *db, Out_cclsCall *entry, bool callee, CallType call_type, bool qualified,
+            int levels) {
+  const QueryFunc &func = db->getFunc(entry->usr);
+  auto def = func.anyDef(db);
   entry->numChildren = 0;
   if (!def)
     return false;
@@ -74,22 +75,24 @@ bool expand(MessageHandler *m, Out_cclsCall *entry, bool callee, CallType call_t
       Out_cclsCall entry1;
       entry1.id = std::to_string(sym.usr);
       entry1.usr = sym.usr;
-      if (auto loc = getLsLocation(m->db, m->wfiles, Use{{sym.range, sym.role}, file_id}))
+      if (auto loc = getLsLocation(db, m->wfiles, Use{{sym.range, sym.role}, file_id}))
         entry1.location = *loc;
       entry1.callType = call_type1;
-      if (expand(m, &entry1, callee, call_type, qualified, levels - 1))
+      if (expand(m, db, &entry1, callee, call_type, qualified, levels - 1))
         entry->children.push_back(std::move(entry1));
     }
   };
   auto handle_uses = [&](const QueryFunc &func, CallType call_type) {
     if (callee) {
-      if (const auto *def = func.anyDef())
+      if (auto def = func.anyDef(db))
         for (SymbolRef sym : def->callees)
           if (sym.kind == Kind::Func)
             handle(sym, def->file_id, call_type);
     } else {
-      for (Use use : func.uses) {
-        const QueryFile &file1 = m->db->files[use.file_id];
+      auto uses = func.uses(db);
+      if (uses.size() != 0) {
+        Use use = *uses.begin();
+        const QueryFile &file1 = db->getFile(use.file_id);
         Maybe<ExtentRef> best;
         for (auto [sym, refcnt] : file1.symbol2refcnt)
           if (refcnt > 0 && sym.extent.valid() && sym.kind == Kind::Func && sym.extent.start <= use.range.start &&
@@ -113,8 +116,9 @@ bool expand(MessageHandler *m, Out_cclsCall *entry, bool callee, CallType call_t
     while (stack.size()) {
       const QueryFunc &func1 = *stack.back();
       stack.pop_back();
-      if (auto *def1 = func1.anyDef()) {
-        eachDefinedFunc(m->db, def1->bases, [&](QueryFunc &func2) {
+      if (func1.anyDef(db)) {
+        auto bases = def->bases;
+        eachDefinedFunc(db, bases, [&](const QueryFunc &func2) {
           if (!seen.count(func2.usr)) {
             seen.insert(func2.usr);
             stack.push_back(&func2);
@@ -131,13 +135,15 @@ bool expand(MessageHandler *m, Out_cclsCall *entry, bool callee, CallType call_t
     while (stack.size()) {
       const QueryFunc &func1 = *stack.back();
       stack.pop_back();
-      eachDefinedFunc(m->db, func1.derived, [&](QueryFunc &func2) {
+      auto fn = [&](const QueryFunc &func2) {
         if (!seen.count(func2.usr)) {
           seen.insert(func2.usr);
           stack.push_back(&func2);
           handle_uses(func2, CallType::Derived);
         }
-      });
+        return true;
+      };
+      eachDefinedFunc(db, func1.deriveds(db), fn);
     }
   }
 
@@ -146,9 +152,10 @@ bool expand(MessageHandler *m, Out_cclsCall *entry, bool callee, CallType call_t
   return true;
 }
 
-std::optional<Out_cclsCall> buildInitial(MessageHandler *m, Usr root_usr, bool callee, CallType call_type,
+std::optional<Out_cclsCall> buildInitial(MessageHandler *m, DB *db, Usr root_usr, bool callee, CallType call_type,
                                          bool qualified, int levels) {
-  const auto *def = m->db->getFunc(root_usr).anyDef();
+  const QueryFunc &func = db->getFunc(root_usr);
+  auto def = func.anyDef(db);
   if (!def)
     return {};
 
@@ -157,15 +164,17 @@ std::optional<Out_cclsCall> buildInitial(MessageHandler *m, Usr root_usr, bool c
   entry.usr = root_usr;
   entry.callType = CallType::Direct;
   if (def->spell) {
-    if (auto loc = getLsLocation(m->db, m->wfiles, *def->spell))
+    if (auto loc = getLsLocation(db, m->wfiles, *def->spell))
       entry.location = *loc;
   }
-  expand(m, &entry, callee, call_type, qualified, levels);
+  expand(m, db, &entry, callee, call_type, qualified, levels);
   return entry;
 }
 } // namespace
 
 void MessageHandler::ccls_call(JsonReader &reader, ReplyOnce &reply) {
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
   Param param;
   reflect(reader, param);
   std::optional<Out_cclsCall> result;
@@ -180,14 +189,14 @@ void MessageHandler::ccls_call(JsonReader &reader, ReplyOnce &reply) {
     result->usr = param.usr;
     result->callType = CallType::Direct;
     if (db->hasFunc(param.usr))
-      expand(this, &*result, param.callee, param.callType, param.qualified, param.levels);
+      expand(this, db, &*result, param.callee, param.callType, param.qualified, param.levels);
   } else {
-    auto [file, wf] = findOrFail(param.textDocument.uri.getPath(), reply);
+    auto [file, wf] = findOrFail(db, param.textDocument.uri.getPath(), reply);
     if (!wf)
       return;
-    for (SymbolRef sym : findSymbolsAtLocation(wf, file, param.position)) {
+    for (SymbolRef sym : findSymbolsAtLocation(wf, &*file, param.position)) {
       if (sym.kind == Kind::Func) {
-        result = buildInitial(this, sym.usr, param.callee, param.callType, param.qualified, param.levels);
+        result = buildInitial(this, db, sym.usr, param.callee, param.callType, param.qualified, param.levels);
         break;
       }
     }
@@ -200,16 +209,18 @@ void MessageHandler::ccls_call(JsonReader &reader, ReplyOnce &reply) {
 }
 
 void MessageHandler::textDocument_prepareCallHierarchy(TextDocumentPositionParam &param, ReplyOnce &reply) {
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
   std::string path = param.textDocument.uri.getPath();
-  auto [file, wf] = findOrFail(path, reply);
+  auto [file, wf] = findOrFail(db, path, reply);
   if (!file)
     return;
 
   std::vector<CallHierarchyItem> result;
-  for (SymbolRef sym : findSymbolsAtLocation(wf, file, param.position)) {
+  for (SymbolRef sym : findSymbolsAtLocation(wf, &*file, param.position)) {
     if (sym.kind != Kind::Func)
       continue;
-    const auto *def = db->getFunc(sym.usr).anyDef();
+    auto def = db->getFunc(sym.usr).anyDef(db);
     if (!def)
       continue;
     auto r = getLsRange(wf, sym.range);
@@ -251,9 +262,8 @@ static std::vector<Out> toCallResult(DB *db,
     default:
       continue;
     case Kind::Func: {
-      auto idx = db->func_usr[sym.usr];
-      const QueryFunc &func = db->funcs[idx];
-      const QueryFunc::Def *def = func.anyDef();
+      const QueryFunc &func = db->getFunc(sym.usr);
+      auto def = func.anyDef(db);
       if (!def)
         continue;
       item.name = def->name(false);
@@ -275,10 +285,12 @@ void MessageHandler::callHierarchy_incomingCalls(CallsParam &param, ReplyOnce &r
   } catch (...) {
     return;
   }
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
   const QueryFunc &func = db->getFunc(usr);
   std::map<SymbolIdx, std::pair<int, std::vector<lsRange>>> sym2ranges;
-  for (Use use : func.uses) {
-    const QueryFile &file = db->files[use.file_id];
+  forEach(func.uses(db), [&](Use use) {
+    const QueryFile &file = db->getFile(use.file_id);
     Maybe<ExtentRef> best;
     for (auto [sym, refcnt] : file.symbol2refcnt)
       if (refcnt > 0 && sym.extent.valid() && sym.kind == Kind::Func && sym.extent.start <= use.range.start &&
@@ -286,7 +298,7 @@ void MessageHandler::callHierarchy_incomingCalls(CallsParam &param, ReplyOnce &r
         best = sym;
     if (best)
       add(sym2ranges, *best, use.file_id);
-  }
+  });
   reply(toCallResult<Out_incomingCall>(db, sym2ranges));
 }
 
@@ -297,9 +309,11 @@ void MessageHandler::callHierarchy_outgoingCalls(CallsParam &param, ReplyOnce &r
   } catch (...) {
     return;
   }
+  auto txn = TxnManager::begin(qs, true);
+  auto db = txn.db();
   const QueryFunc &func = db->getFunc(usr);
   std::map<SymbolIdx, std::pair<int, std::vector<lsRange>>> sym2ranges;
-  if (const auto *def = func.anyDef())
+  if (auto def = func.anyDef(db))
     for (SymbolRef sym : def->callees)
       if (sym.kind == Kind::Func) {
         add(sym2ranges, sym, def->file_id);

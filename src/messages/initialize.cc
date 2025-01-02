@@ -311,7 +311,7 @@ void *indexer(void *arg_) {
 #if LLVM_ENABLE_THREADS && !defined(__APPLE__)
   set_thread_priority(ThreadPriority::Background);
 #endif
-  pipeline::indexer_Main(h->manager, h->vfs, h->project, h->wfiles);
+  pipeline::indexer_Main(h->manager, h->vfs, h->qs, h->project, h->wfiles);
   pipeline::threadLeave();
   return nullptr;
 }
@@ -350,6 +350,17 @@ void do_initialize(MessageHandler *m, InitializeParam &param, ReplyOnce &reply) 
       g_config->cache.directory = normalizePath(path.str());
       ensureEndsInSlash(g_config->cache.directory);
     }
+  }
+
+  if (!g_config->cache.directory.empty()) {
+    sys::fs::create_directories(g_config->cache.directory);
+    m->qs = std::make_shared<QueryStore>(g_config->cache.directory);
+    {
+      auto txn = TxnManager::begin(m->qs, true);
+      auto db = txn.db();
+      db->populateVFS(m->vfs);
+    }
+    LOG_S(INFO) << "Database switched.";
   }
 
   // Client capabilities

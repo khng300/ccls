@@ -25,8 +25,13 @@ void MessageHandler::ccls_reload(JsonReader &reader) {
   reflect(reader, param);
   // Send index requests for every file.
   if (param.whitelist.empty() && param.blacklist.empty()) {
-    vfs->clear();
-    db->clear();
+    {
+      auto txn = TxnManager::begin(qs, false);
+      auto db = txn.db();
+      vfs->clear();
+      db->clear();
+      std::move(txn).commit();
+    }
     project->index(wfiles, RequestId());
     manager->clear();
     return;
