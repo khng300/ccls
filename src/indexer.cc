@@ -1350,20 +1350,20 @@ void reflect(JsonReader &vis, SymbolRef &v) {
 void reflect(JsonReader &vis, Use &v) {
   std::string t = vis.getString();
   char *s = const_cast<char *>(t.c_str());
-  v.range = Range::fromString(s);
+  v.ref.range = Range::fromString(s);
   s = strchr(s, '|');
-  v.role = static_cast<Role>(strtol(s + 1, &s, 10));
+  v.ref.role = static_cast<Role>(strtol(s + 1, &s, 10));
   v.file_id = static_cast<int>(strtol(s + 1, &s, 10));
 }
 void reflect(JsonReader &vis, DeclRef &v) {
   std::string t = vis.getString();
   char *s = const_cast<char *>(t.c_str());
-  v.range = Range::fromString(s);
+  v.use.ref.range = Range::fromString(s);
   s = strchr(s, '|') + 1;
   v.extent = Range::fromString(s);
   s = strchr(s, '|');
-  v.role = static_cast<Role>(strtol(s + 1, &s, 10));
-  v.file_id = static_cast<int>(strtol(s + 1, &s, 10));
+  v.use.ref.role = static_cast<Role>(strtol(s + 1, &s, 10));
+  v.use.file_id = static_cast<int>(strtol(s + 1, &s, 10));
 }
 
 void reflect(JsonWriter &vis, SymbolRef &v) {
@@ -1374,14 +1374,14 @@ void reflect(JsonWriter &vis, SymbolRef &v) {
 }
 void reflect(JsonWriter &vis, Use &v) {
   char buf[99];
-  snprintf(buf, sizeof buf, "%s|%d|%d", v.range.toString().c_str(), int(v.role), v.file_id);
+  snprintf(buf, sizeof buf, "%s|%d|%d", v.ref.range.toString().c_str(), int(v.ref.role), v.file_id);
   std::string s(buf);
   reflect(vis, s);
 }
 void reflect(JsonWriter &vis, DeclRef &v) {
   char buf[99];
-  snprintf(buf, sizeof buf, "%s|%s|%d|%d", v.range.toString().c_str(), v.extent.toString().c_str(), int(v.role),
-           v.file_id);
+  snprintf(buf, sizeof buf, "%s|%s|%d|%d", v.use.ref.range.toString().c_str(), v.extent.toString().c_str(),
+           int(v.use.ref.role), v.use.file_id);
   std::string s(buf);
   reflect(vis, s);
 }
@@ -1393,8 +1393,8 @@ void reflect(BinaryReader &vis, SymbolRef &v) {
   reflect(vis, v.role);
 }
 void reflect(BinaryReader &vis, Use &v) {
-  reflect(vis, v.range);
-  reflect(vis, v.role);
+  reflect(vis, v.ref.range);
+  reflect(vis, v.ref.role);
   reflect(vis, v.file_id);
 }
 void reflect(BinaryReader &vis, DeclRef &v) {
@@ -1409,8 +1409,8 @@ void reflect(BinaryWriter &vis, SymbolRef &v) {
   reflect(vis, v.role);
 }
 void reflect(BinaryWriter &vis, Use &v) {
-  reflect(vis, v.range);
-  reflect(vis, v.role);
+  reflect(vis, v.ref.range);
+  reflect(vis, v.ref.role);
   reflect(vis, v.file_id);
 }
 void reflect(BinaryWriter &vis, DeclRef &v) {

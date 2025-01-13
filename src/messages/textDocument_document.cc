@@ -47,20 +47,20 @@ void MessageHandler::textDocument_documentHighlight(TextDocumentPositionParam &p
   for (auto [sym, refcnt] : file->symbol2refcnt) {
     if (refcnt <= 0)
       continue;
-    Usr usr = sym.usr;
-    Kind kind = sym.kind;
+    Usr usr = sym.sr.usr;
+    Kind kind = sym.sr.kind;
     if (std::none_of(syms.begin(), syms.end(), [&](auto &sym1) { return usr == sym1.usr && kind == sym1.kind; }))
       continue;
     if (auto loc = getLsLocation(db, wfiles, sym, file_id)) {
       DocumentHighlight highlight;
       highlight.range = loc->range;
-      if (sym.role & Role::Write)
+      if (sym.sr.role & Role::Write)
         highlight.kind = DocumentHighlight::Write;
-      else if (sym.role & Role::Read)
+      else if (sym.sr.role & Role::Read)
         highlight.kind = DocumentHighlight::Read;
       else
         highlight.kind = DocumentHighlight::Text;
-      highlight.role = sym.role;
+      highlight.role = sym.sr.role;
       result.push_back(highlight);
     }
   }
@@ -139,7 +139,7 @@ void MessageHandler::textDocument_documentSymbol(JsonReader &reader, ReplyOnce &
     std::vector<lsRange> result;
     for (auto [sym, refcnt] : file->symbol2refcnt) {
       if (refcnt <= 0 || !allows(sym) ||
-          !(param.startLine <= sym.range.start.line && sym.range.start.line <= param.endLine))
+          !(param.startLine <= sym.sr.range.start.line && sym.sr.range.start.line <= param.endLine))
         continue;
       if (auto loc = getLsLocation(db, wfiles, sym, file_id))
         result.push_back(loc->range);
@@ -156,14 +156,14 @@ void MessageHandler::textDocument_documentSymbol(JsonReader &reader, ReplyOnce &
     // by range.start instead. In case of a tie, prioritize the widest
     // ExtentRef.
     std::sort(syms.begin(), syms.end(), [](const ExtentRef &lhs, const ExtentRef &rhs) {
-      return std::tie(lhs.range.start, rhs.extent.end) < std::tie(rhs.range.start, lhs.extent.end);
+      return std::tie(lhs.sr.range.start, rhs.extent.end) < std::tie(rhs.sr.range.start, lhs.extent.end);
     });
 
     std::vector<std::unique_ptr<DocumentSymbol>> res;
     std::vector<DocumentSymbol *> scopes;
     for (ExtentRef sym : syms) {
       auto ds = std::make_unique<DocumentSymbol>();
-      if (auto range = getLsRange(wf, sym.range)) {
+      if (auto range = getLsRange(wf, sym.sr.range)) {
         ds->selectionRange = *range;
         ds->range = ds->selectionRange;
         // For a macro expansion, M(name), we may use `M` for extent and
@@ -202,8 +202,8 @@ void MessageHandler::textDocument_documentSymbol(JsonReader &reader, ReplyOnce &
       if (refcnt <= 0 || !allows(sym))
         continue;
       if (std::optional<SymbolInformation> info = getSymbolInfo(db, sym, false)) {
-        if ((sym.kind == Kind::Type && ignore(db->getType(sym).anyDef(db))) ||
-            (sym.kind == Kind::Var && ignore(db->getVar(sym).anyDef(db))))
+        if ((sym.sr.kind == Kind::Type && ignore(db->getType(sym).anyDef(db))) ||
+            (sym.sr.kind == Kind::Var && ignore(db->getVar(sym).anyDef(db))))
           continue;
         if (auto loc = getLsLocation(db, wfiles, sym, file_id)) {
           info->location = *loc;
@@ -232,7 +232,7 @@ void MessageHandler::textDocument_switchSourceHeader(TextDocumentIdentifier &par
   // Ignore Type symbols to skip class forward declarations and namespaces.
   std::unordered_map<int, int> file_id2cnt;
   for (auto [sym, refcnt] : file->symbol2refcnt) {
-    if (refcnt <= 0 || !sym.extent.valid() || sym.kind == Kind::Type)
+    if (refcnt <= 0 || !sym.extent.valid() || sym.sr.kind == Kind::Type)
       continue;
 
     if (is_hdr) {
@@ -243,8 +243,8 @@ void MessageHandler::textDocument_switchSourceHeader(TextDocumentIdentifier &par
       });
     } else {
       for (DeclRef dr : getNonDefDeclarations(db, sym))
-        if (dr.file_id != file_id)
-          ++file_id2cnt[dr.file_id];
+        if (dr.use.file_id != file_id)
+          ++file_id2cnt[dr.use.file_id];
     }
   }
   if (file_id2cnt.size()) {

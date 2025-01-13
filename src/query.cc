@@ -296,8 +296,8 @@ void DB::Updater::update(std::unordered_map<int, QueryFile> &files, const Lid2fi
     u.second.file_id = file_id;
     if (def.spell) {
       assignFileId(lid2file_id, file_id, *def.spell);
-      files[def.spell->file_id]
-          .symbol2refcnt[{{def.spell->range, u.first, Kind::Func, def.spell->role}, def.spell->extent}]++;
+      files[def.spell->use.file_id].symbol2refcnt[{
+          {def.spell->use.ref.range, u.first, Kind::Func, def.spell->use.ref.role}, def.spell->extent}]++;
     }
     auto [entity, _] = idPutEntity(Kind::Func, u.first);
     insertEntityDef(entity, def);
@@ -312,8 +312,8 @@ void DB::Updater::update(std::unordered_map<int, QueryFile> &files, const Lid2fi
     u.second.file_id = file_id;
     if (def.spell) {
       assignFileId(lid2file_id, file_id, *def.spell);
-      files[def.spell->file_id]
-          .symbol2refcnt[{{def.spell->range, u.first, Kind::Type, def.spell->role}, def.spell->extent}]++;
+      files[def.spell->use.file_id].symbol2refcnt[{
+          {def.spell->use.ref.range, u.first, Kind::Type, def.spell->use.ref.role}, def.spell->extent}]++;
     }
     auto [entity, _] = idPutEntity(Kind::Type, u.first);
     insertEntityDef(entity, def);
@@ -328,8 +328,8 @@ void DB::Updater::update(std::unordered_map<int, QueryFile> &files, const Lid2fi
     u.second.file_id = file_id;
     if (def.spell) {
       assignFileId(lid2file_id, file_id, *def.spell);
-      files[def.spell->file_id]
-          .symbol2refcnt[{{def.spell->range, u.first, Kind::Var, def.spell->role}, def.spell->extent}]++;
+      files[def.spell->use.file_id].symbol2refcnt[{
+          {def.spell->use.ref.range, u.first, Kind::Var, def.spell->use.ref.role}, def.spell->extent}]++;
     }
     auto [entity, _] = idPutEntity(Kind::Var, u.first);
     insertEntityDef(entity, def);
@@ -385,7 +385,7 @@ void DB::Updater::applyIndexUpdate(IndexUpdate *u) {
   // References (Use &use) in this function are important to update file_id.
   auto ref = [&](std::unordered_map<int, int> &lid2fid, Usr usr, Kind kind, Use &use, int delta) {
     use.file_id = use.file_id == -1 ? u->file_id : lid2fid.find(use.file_id)->second;
-    ExtentRef sym{{use.range, usr, kind, use.role}};
+    ExtentRef sym{{use.ref.range, usr, kind, use.ref.role}};
     int &v = files[use.file_id].symbol2refcnt[sym];
     v += delta;
     assert(v >= 0);
@@ -393,36 +393,36 @@ void DB::Updater::applyIndexUpdate(IndexUpdate *u) {
       files[use.file_id].symbol2refcnt.erase(sym);
   };
   auto refDecl = [&](std::unordered_map<int, int> &lid2fid, Usr usr, Kind kind, DeclRef &dr, int delta) {
-    dr.file_id = dr.file_id == -1 ? u->file_id : lid2fid.find(dr.file_id)->second;
-    ExtentRef sym{{dr.range, usr, kind, dr.role}, dr.extent};
-    int &v = files[dr.file_id].symbol2refcnt[sym];
+    dr.use.file_id = dr.use.file_id == -1 ? u->file_id : lid2fid.find(dr.use.file_id)->second;
+    ExtentRef sym{{dr.use.ref.range, usr, kind, dr.use.ref.role}, dr.extent};
+    int &v = files[dr.use.file_id].symbol2refcnt[sym];
     v += delta;
     assert(v >= 0);
     if (!v)
-      files[dr.file_id].symbol2refcnt.erase(sym);
+      files[dr.use.file_id].symbol2refcnt.erase(sym);
   };
 
   auto updateUses = [&](Usr usr, Kind kind, auto &p, bool hint_implicit, lmdb::dbi &dbi_entities_uses) {
     auto [entity, _] = idPutEntity(kind, usr);
     for (Use &use : p.first) {
-      if (hint_implicit && use.role & Role::Implicit) {
+      if (hint_implicit && use.ref.role & Role::Implicit) {
         // Make ranges of implicit function calls larger (spanning one more
         // column to the left/right). This is hacky but useful. e.g.
         // textDocument/definition on the space/semicolon in `A a;` or `
         // 42;` will take you to the constructor.
-        if (use.range.start.column > 0)
-          use.range.start.column--;
-        use.range.end.column++;
+        if (use.ref.range.start.column > 0)
+          use.ref.range.start.column--;
+        use.ref.range.end.column++;
       }
       ref(prev_lid2file_id, usr, kind, use, -1);
     }
     for (Use &use : p.first)
       dbi_entities_uses.del(txn_, lmdb::to_sv(entity.id), lmdb::to_sv(use));
     for (Use &use : p.second) {
-      if (hint_implicit && use.role & Role::Implicit) {
-        if (use.range.start.column > 0)
-          use.range.start.column--;
-        use.range.end.column++;
+      if (hint_implicit && use.ref.role & Role::Implicit) {
+        if (use.ref.range.start.column > 0)
+          use.ref.range.start.column--;
+        use.ref.range.end.column++;
       }
       ref(lid2file_id, usr, kind, use, 1);
     }
@@ -817,7 +817,7 @@ DocumentUri getLsDocumentUri(DB *db, int file_id) {
 std::optional<Location> getLsLocation(DB *db, WorkingFiles *wfiles, Use use) {
   std::string path;
   DocumentUri uri = getLsDocumentUri(db, use.file_id, &path);
-  std::optional<lsRange> range = getLsRange(wfiles->getFile(path), use.range);
+  std::optional<lsRange> range = getLsRange(wfiles->getFile(path), use.ref.range);
   if (!range)
     return std::nullopt;
   return Location{uri, *range};
@@ -829,8 +829,8 @@ std::optional<Location> getLsLocation(DB *db, WorkingFiles *wfiles, SymbolRef sy
 
 LocationLink getLocationLink(DB *db, WorkingFiles *wfiles, DeclRef dr) {
   std::string path;
-  DocumentUri uri = getLsDocumentUri(db, dr.file_id, &path);
-  if (auto range = getLsRange(wfiles->getFile(path), dr.range))
+  DocumentUri uri = getLsDocumentUri(db, dr.use.file_id, &path);
+  if (auto range = getLsRange(wfiles->getFile(path), dr.use.ref.range))
     if (auto extent = getLsRange(wfiles->getFile(path), dr.extent)) {
       LocationLink ret;
       ret.targetUri = uri.raw_uri;
@@ -901,8 +901,8 @@ std::vector<SymbolRef> findSymbolsAtLocation(WorkingFile *wfile, const QueryFile
   }
 
   for (auto [sym, refcnt] : file->symbol2refcnt)
-    if (refcnt > 0 && sym.range.contains(ls_pos.line, ls_pos.character))
-      symbols.push_back(sym);
+    if (refcnt > 0 && sym.sr.range.contains(ls_pos.line, ls_pos.character))
+      symbols.push_back(sym.sr);
 
   // Order shorter ranges first, since they are more detailed/precise. This is
   // important for macros which generate code so that we can resolving the

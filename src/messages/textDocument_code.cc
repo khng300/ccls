@@ -103,41 +103,41 @@ void MessageHandler::textDocument_codeLens(TextDocumentParam &param, ReplyOnce &
 
   std::unordered_set<Range> seen;
   for (auto [sym, refcnt] : file->symbol2refcnt) {
-    if (refcnt <= 0 || !sym.extent.valid() || !seen.insert(sym.range).second)
+    if (refcnt <= 0 || !sym.extent.valid() || !seen.insert(sym.sr.range).second)
       continue;
-    switch (sym.kind) {
+    switch (sym.sr.kind) {
     case Kind::Func: {
-      const QueryFunc &func = db->getFunc(sym);
+      const QueryFunc &func = db->getFunc(sym.sr);
       auto def = func.anyDef(db);
       if (!def)
         continue;
       std::vector<Use> base_uses = getUsesForAllBases(db, func);
       std::vector<Use> derived_uses = getUsesForAllDerived(db, func);
-      add("ref", {sym.usr, Kind::Func, "uses"}, sym.range, func.uses(db).size(), base_uses.empty());
+      add("ref", {sym.sr.usr, Kind::Func, "uses"}, sym.sr.range, func.uses(db).size(), base_uses.empty());
       if (base_uses.size())
-        add("b.ref", {sym.usr, Kind::Func, "bases uses"}, sym.range, base_uses.size());
+        add("b.ref", {sym.sr.usr, Kind::Func, "bases uses"}, sym.sr.range, base_uses.size());
       if (derived_uses.size())
-        add("d.ref", {sym.usr, Kind::Func, "derived uses"}, sym.range, derived_uses.size());
+        add("d.ref", {sym.sr.usr, Kind::Func, "derived uses"}, sym.sr.range, derived_uses.size());
       if (base_uses.empty())
-        add("base", {sym.usr, Kind::Func, "bases"}, sym.range, def->bases.size());
-      add("derived", {sym.usr, Kind::Func, "derived"}, sym.range, func.deriveds(db).size());
+        add("base", {sym.sr.usr, Kind::Func, "bases"}, sym.sr.range, def->bases.size());
+      add("derived", {sym.sr.usr, Kind::Func, "derived"}, sym.sr.range, func.deriveds(db).size());
       break;
     }
     case Kind::Type: {
-      const QueryType &type = db->getType(sym);
-      add("ref", {sym.usr, Kind::Type, "uses"}, sym.range, type.uses(db).size(), true);
-      add("derived", {sym.usr, Kind::Type, "derived"}, sym.range, type.deriveds(db).size());
-      add("var", {sym.usr, Kind::Type, "instances"}, sym.range, type.instances(db).size());
+      const QueryType &type = db->getType(sym.sr);
+      add("ref", {sym.sr.usr, Kind::Type, "uses"}, sym.sr.range, type.uses(db).size(), true);
+      add("derived", {sym.sr.usr, Kind::Type, "derived"}, sym.sr.range, type.deriveds(db).size());
+      add("var", {sym.sr.usr, Kind::Type, "instances"}, sym.sr.range, type.instances(db).size());
       break;
     }
     case Kind::Var: {
-      const QueryVar &var = db->getVar(sym);
+      const QueryVar &var = db->getVar(sym.sr);
       auto def = var.anyDef(db);
       if (!def)
         continue;
       if (!def || (def->is_local() && !g_config->codeLens.localVariables))
         continue;
-      add("ref", {sym.usr, Kind::Var, "uses"}, sym.range, var.uses(db).size(), def->kind != SymbolKind::Macro);
+      add("ref", {sym.sr.usr, Kind::Var, "uses"}, sym.sr.range, var.uses(db).size(), def->kind != SymbolKind::Macro);
       break;
     }
     case Kind::File:

@@ -62,7 +62,7 @@ struct alignas(16) QueryEntity {
   Kind kind;
 };
 
-struct alignas(16) QueryEntityDef {
+struct alignas(16) QueryFuncDef : NameMixin<QueryFuncDef> {
   // General metadata.
   cista_types::cstring detailed_name;
   cista_types::cstring hover;
@@ -77,14 +77,6 @@ struct alignas(16) QueryEntityDef {
   SymbolKind kind = SymbolKind::Unknown;
   SymbolKind parent_kind = SymbolKind::Unknown;
 
-  auto cista_members() {
-    return std::tie(detailed_name, hover, comments, static_cast<Ref &>(spell.storage), spell.storage.file_id,
-                    spell.storage.extent, file_id, qual_name_offset, short_name_offset, short_name_size, kind,
-                    parent_kind);
-  }
-};
-
-struct alignas(16) QueryFuncDef : QueryEntityDef, NameMixin<QueryFuncDef> {
   // Method this method overrides.
   cista_types::vector<Usr> bases;
   // Local variables or parameters.
@@ -94,10 +86,27 @@ struct alignas(16) QueryFuncDef : QueryEntityDef, NameMixin<QueryFuncDef> {
 
   uint8_t storage = clang::SC_None;
 
-  auto cista_members() { return std::tie(static_cast<QueryEntityDef &>(*this), bases, vars, callees, storage); }
+  auto cista_members() {
+    return std::tie(detailed_name, hover, comments, spell.storage, file_id, qual_name_offset, short_name_offset,
+                    short_name_size, kind, parent_kind, bases, vars, callees, storage);
+  }
 };
 
-struct alignas(16) QueryTypeDef : QueryEntityDef, NameMixin<QueryTypeDef> {
+struct alignas(16) QueryTypeDef : NameMixin<QueryTypeDef> {
+  // General metadata.
+  cista_types::cstring detailed_name;
+  cista_types::cstring hover;
+  cista_types::cstring comments;
+  Maybe<DeclRef> spell;
+
+  int file_id = -1;
+  int16_t qual_name_offset = 0;
+  int16_t short_name_offset = 0;
+  int16_t short_name_size = 0;
+
+  SymbolKind kind = SymbolKind::Unknown;
+  SymbolKind parent_kind = SymbolKind::Unknown;
+
   cista_types::vector<Usr> bases;
   // Types, functions, and variables defined in this type.
   cista_types::vector<Usr> funcs;
@@ -108,10 +117,27 @@ struct alignas(16) QueryTypeDef : QueryEntityDef, NameMixin<QueryTypeDef> {
   // type comes from a using or typedef statement).
   Usr alias_of = 0;
 
-  auto cista_members() { return std::tie(static_cast<QueryEntityDef &>(*this), bases, funcs, types, vars, alias_of); }
+  auto cista_members() {
+    return std::tie(detailed_name, hover, comments, spell.storage, file_id, qual_name_offset, short_name_offset,
+                    short_name_size, kind, parent_kind, bases, funcs, types, vars, alias_of);
+  }
 };
 
-struct alignas(16) QueryVarDef : QueryEntityDef, NameMixin<QueryVarDef> {
+struct alignas(16) QueryVarDef : NameMixin<QueryVarDef> {
+  // General metadata.
+  cista_types::cstring detailed_name;
+  cista_types::cstring hover;
+  cista_types::cstring comments;
+  Maybe<DeclRef> spell;
+
+  int file_id = -1;
+  int16_t qual_name_offset = 0;
+  int16_t short_name_offset = 0;
+  int16_t short_name_size = 0;
+
+  SymbolKind kind = SymbolKind::Unknown;
+  SymbolKind parent_kind = SymbolKind::Unknown;
+
   cista_types::vector<Usr> bases;
   // Type of the variable.
   Usr type = 0;
@@ -119,14 +145,17 @@ struct alignas(16) QueryVarDef : QueryEntityDef, NameMixin<QueryVarDef> {
   // (declaration).
   uint8_t storage = clang::SC_None;
 
+  auto cista_members() {
+    return std::tie(detailed_name, hover, comments, spell.storage, file_id, qual_name_offset, short_name_offset,
+                    short_name_size, kind, parent_kind, bases, type, storage);
+  }
+
   bool is_local() const {
     return spell &&
            (parent_kind == SymbolKind::Function || parent_kind == SymbolKind::Method ||
             parent_kind == SymbolKind::StaticMethod || parent_kind == SymbolKind::Constructor) &&
            (storage == clang::SC_None || storage == clang::SC_Auto || storage == clang::SC_Register);
   }
-
-  auto cista_members() { return std::tie(static_cast<QueryEntityDef &>(*this), bases, type, storage); }
 };
 
 template <typename QType, typename QDef> struct QueryObject : QueryEntity {
@@ -362,7 +391,7 @@ private:
 
 template <typename QType, typename QDef>
 auto QueryObject<QType, QDef>::defs(const DB *db) const -> SubdbContainer<EntityID, Def> {
-  return SubdbContainer<EntityID, QueryEntityDef>(db->txn_, db->qs_.entities_defs, id);
+  return SubdbContainer<EntityID, QDef>(db->txn_, db->qs_.entities_defs, id);
 }
 template <typename QType, typename QDef>
 SubdbContainer<EntityID, DeclRef> QueryObject<QType, QDef>::decls(const DB *db) const {

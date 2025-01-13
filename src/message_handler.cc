@@ -305,9 +305,9 @@ static std::unordered_map<SymbolIdx, CclsSemanticHighlightSymbol> computeSemanti
     uint64_t usr = -1ull;
     // This switch statement also filters out symbols that are not
     // highlighted.
-    switch (sym.kind) {
+    switch (sym.sr.kind) {
     case Kind::Func: {
-      const auto &func = db->getFunc(sym.usr);
+      const auto &func = db->getFunc(sym.sr.usr);
       auto def = func.anyDef(db);
       if (!def)
         continue; // applies to for loop
@@ -326,20 +326,20 @@ static std::unordered_map<SymbolIdx, CclsSemanticHighlightSymbol> computeSemanti
       // E.g. copy-initialization of constructors should not be highlighted
       // but we still want to keep the range for jumping to definition.
       std::string_view concise_name = detailed_name.substr(0, detailed_name.find('<'));
-      uint16_t start_line = sym.range.start.line;
-      int16_t start_col = sym.range.start.column;
+      uint16_t start_line = sym.sr.range.start.line;
+      int16_t start_col = sym.sr.range.start.column;
       if (start_line >= wfile->index_lines.size())
         continue;
       std::string_view line = wfile->index_lines[start_line];
-      sym.range.end.line = start_line;
+      sym.sr.range.end.line = start_line;
       if (!(start_col + concise_name.size() <= line.size() &&
             line.compare(start_col, concise_name.size(), concise_name) == 0))
         continue;
-      sym.range.end.column = start_col + concise_name.size();
+      sym.sr.range.end.column = start_col + concise_name.size();
       break;
     }
     case Kind::Type: {
-      const auto &type = db->getType(sym.usr);
+      const auto &type = db->getType(sym.sr.usr);
       allOf(type.defs(db), [&](const auto &def) {
         kind = def.kind;
         detailed_name = def.detailed_name;
@@ -352,7 +352,7 @@ static std::unordered_map<SymbolIdx, CclsSemanticHighlightSymbol> computeSemanti
       break;
     }
     case Kind::Var: {
-      const auto &var = db->getVar(sym.usr);
+      const auto &var = db->getVar(sym.sr.usr);
       allOf(var.defs(db), [&](const auto &def) {
         kind = def.kind;
         storage = def.storage;
@@ -369,17 +369,17 @@ static std::unordered_map<SymbolIdx, CclsSemanticHighlightSymbol> computeSemanti
       continue; // applies to for loop
     }
 
-    if (std::optional<lsRange> loc = getLsRange(wfile, sym.range)) {
+    if (std::optional<lsRange> loc = getLsRange(wfile, sym.sr.range)) {
       auto it = grouped_symbols.find(sym);
       if (it != grouped_symbols.end()) {
-        it->second.lsOccurs.push_back({*loc, sym.role});
+        it->second.lsOccurs.push_back({*loc, sym.sr.role});
       } else {
         CclsSemanticHighlightSymbol symbol;
         symbol.id = usr;
         symbol.parentKind = parent_kind;
         symbol.kind = kind;
         symbol.storage = storage;
-        symbol.lsOccurs.push_back({*loc, sym.role});
+        symbol.lsOccurs.push_back({*loc, sym.sr.role});
         grouped_symbols[sym] = symbol;
       }
     }

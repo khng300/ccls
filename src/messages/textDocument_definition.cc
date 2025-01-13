@@ -21,7 +21,7 @@ void MessageHandler::textDocument_declaration(TextDocumentPositionParam &param, 
   Position &ls_pos = param.position;
   for (SymbolRef sym : findSymbolsAtLocation(wf, &*file, param.position))
     for (DeclRef dr : getNonDefDeclarations(db, sym))
-      if (!(dr.file_id == file_id && dr.range.contains(ls_pos.line, ls_pos.character)))
+      if (!(dr.use.file_id == file_id && dr.use.ref.range.contains(ls_pos.line, ls_pos.character)))
         if (auto loc = getLocationLink(db, wfiles, dr))
           result.push_back(loc);
   reply.replyLocationLink(result);
@@ -47,7 +47,7 @@ void MessageHandler::textDocument_definition(TextDocumentPositionParam &param, R
     eachEntityDef(db, sym, [&](const auto &def) {
       if (def.spell) {
         DeclRef spell = *def.spell;
-        if (spell.file_id == file_id && spell.range.contains(ls_pos.line, ls_pos.character)) {
+        if (spell.use.file_id == file_id && spell.use.ref.range.contains(ls_pos.line, ls_pos.character)) {
           on_def = spell;
           drs.clear();
           return false;
@@ -61,7 +61,7 @@ void MessageHandler::textDocument_definition(TextDocumentPositionParam &param, R
     // all declarations/definitions.
     if (drs.empty()) {
       for (DeclRef dr : getNonDefDeclarations(db, sym))
-        if (!(dr.file_id == file_id && dr.range.contains(ls_pos.line, ls_pos.character)))
+        if (!(dr.use.file_id == file_id && dr.use.ref.range.contains(ls_pos.line, ls_pos.character)))
           drs.push_back(dr);
       // There is no declaration but the cursor is on a definition.
       if (drs.empty() && on_def)
@@ -106,8 +106,8 @@ void MessageHandler::textDocument_definition(TextDocumentPositionParam &param, R
         if (short_name != short_query)
           return;
         if (Maybe<DeclRef> dr = getDefinitionSpell(db, sym)) {
-          std::tuple<int, int, bool, int> score{int(name.size() - short_query.size()), 0, dr->file_id != file_id,
-                                                std::abs(dr->range.start.line - position.line)};
+          std::tuple<int, int, bool, int> score{int(name.size() - short_query.size()), 0, dr->use.file_id != file_id,
+                                                std::abs(dr->use.ref.range.start.line - position.line)};
           // Update the score with qualified name if the qualified name
           // occurs in |name|.
           auto pos = name.rfind(query);

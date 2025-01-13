@@ -26,7 +26,7 @@ void MessageHandler::textDocument_foldingRange(TextDocumentParam &param, ReplyOn
   std::optional<lsRange> ls_range;
 
   for (auto [sym, refcnt] : file->symbol2refcnt)
-    if (refcnt > 0 && sym.extent.valid() && (sym.kind == Kind::Func || sym.kind == Kind::Type) &&
+    if (refcnt > 0 && sym.extent.valid() && (sym.sr.kind == Kind::Func || sym.sr.kind == Kind::Type) &&
         (ls_range = getLsRange(wf, sym.extent))) {
       FoldingRange &fold = result.emplace_back();
       fold.startLine = ls_range->start.line;

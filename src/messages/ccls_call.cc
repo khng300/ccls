@@ -95,8 +95,9 @@ bool expand(MessageHandler *m, DB *db, Out_cclsCall *entry, bool callee, CallTyp
         const QueryFile &file1 = db->getFile(use.file_id);
         Maybe<ExtentRef> best;
         for (auto [sym, refcnt] : file1.symbol2refcnt)
-          if (refcnt > 0 && sym.extent.valid() && sym.kind == Kind::Func && sym.extent.start <= use.range.start &&
-              use.range.end <= sym.extent.end && (!best || best->extent.start < sym.extent.start))
+          if (refcnt > 0 && sym.extent.valid() && sym.sr.kind == Kind::Func &&
+              sym.extent.start <= use.ref.range.start && use.ref.range.end <= sym.extent.end &&
+              (!best || best->extent.start < sym.extent.start))
             best = sym;
         if (best)
           handle(*best, use.file_id, call_type);
@@ -293,8 +294,8 @@ void MessageHandler::callHierarchy_incomingCalls(CallsParam &param, ReplyOnce &r
     const QueryFile &file = db->getFile(use.file_id);
     Maybe<ExtentRef> best;
     for (auto [sym, refcnt] : file.symbol2refcnt)
-      if (refcnt > 0 && sym.extent.valid() && sym.kind == Kind::Func && sym.extent.start <= use.range.start &&
-          use.range.end <= sym.extent.end && (!best || best->extent.start < sym.extent.start))
+      if (refcnt > 0 && sym.extent.valid() && sym.sr.kind == Kind::Func && sym.extent.start <= use.ref.range.start &&
+          use.ref.range.end <= sym.extent.end && (!best || best->extent.start < sym.extent.start))
         best = sym;
     if (best)
       add(sym2ranges, *best, use.file_id);

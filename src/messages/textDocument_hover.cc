@@ -61,7 +61,7 @@ std::pair<std::optional<MarkedString>, std::optional<MarkedString>> getHover(DB 
           else if (strlen(s) > hover->value.size())
             hover->value = s;
         }
-        if (d.spell->file_id == file_id)
+        if (d.spell->use.file_id == file_id)
           return false;
       }
       return true;

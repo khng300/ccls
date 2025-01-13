@@ -74,12 +74,15 @@ struct SymbolRef {
   bool valid() const { return range.valid(); }
 };
 
-struct ExtentRef : SymbolRef {
+struct ExtentRef {
+  SymbolRef sr;
   Range extent;
-  std::tuple<Range, Usr, Kind, Role, Range> toTuple() const { return std::make_tuple(range, usr, kind, role, extent); }
+  std::tuple<SymbolRef, Range> toTuple() const { return std::make_tuple(sr, extent); }
   bool operator==(const ExtentRef &o) const { return toTuple() == o.toTuple(); }
-
-  auto cista_members() { return std::tie(static_cast<SymbolRef &>(*this), extent); }
+  bool valid() const { return sr.valid(); }
+  operator SymbolRef &() noexcept { return sr; }
+  operator const SymbolRef &() const noexcept { return sr; }
+  operator SymbolIdx() noexcept { return sr; }
 };
 
 struct Ref {
@@ -94,17 +97,25 @@ struct Ref {
 
 // Represents an occurrence of a variable/type, |usr,kind| refer to the lexical
 // parent.
-struct Use : Ref {
+struct Use {
+  Ref ref;
   // |file| is used in Query* but not in Index*
   int file_id = -1;
+  bool valid() const { return ref.valid(); }
   bool operator==(const Use &o) const {
     // lexical container info is ignored.
-    return range == o.range && file_id == o.file_id;
+    return ref.range == o.ref.range && file_id == o.file_id;
   }
+  operator Ref &() noexcept { return ref; }
+  operator const Ref &() const noexcept { return ref; }
 };
 
-struct DeclRef : Use {
+struct DeclRef {
+  Use use;
   Range extent;
+  bool valid() const { return use.valid(); }
+  operator Use &() noexcept { return use; }
+  operator const Use &() const noexcept { return use; }
 };
 
 void reflect(JsonReader &visitor, SymbolRef &value);
@@ -330,6 +341,6 @@ IndexResult index(SemaManager *complete, WorkingFiles *wfiles, VFS *vfs, const s
 } // namespace ccls
 
 MAKE_HASHABLE(ccls::SymbolRef, t.range, t.usr, t.kind, t.role);
-MAKE_HASHABLE(ccls::ExtentRef, t.range, t.usr, t.kind, t.role, t.extent);
-MAKE_HASHABLE(ccls::Use, t.range, t.file_id)
-MAKE_HASHABLE(ccls::DeclRef, t.range, t.file_id)
+MAKE_HASHABLE(ccls::ExtentRef, t.sr, t.extent);
+MAKE_HASHABLE(ccls::Use, t.ref.range, t.file_id)
+MAKE_HASHABLE(ccls::DeclRef, t.use.ref.range, t.use.file_id)

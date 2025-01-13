@@ -112,7 +112,7 @@ bool addSymbol(DB *db, WorkingFiles *wfiles, const std::vector<uint8_t> &file_se
     allOf(entity.defs(db), [&](const auto &def) {
       if (def.spell) {
         dr = def.spell;
-        if (!in_folder && (in_folder = file_set[def.spell->file_id]))
+        if (!in_folder && (in_folder = file_set[def.spell->use.file_id]))
           return false;
       }
       return true;
@@ -122,7 +122,7 @@ bool addSymbol(DB *db, WorkingFiles *wfiles, const std::vector<uint8_t> &file_se
     auto decls = getNonDefDeclarations(db, sym);
     for (auto &dr1 : decls) {
       dr = dr1;
-      if (!in_folder && (in_folder = file_set[dr1.file_id]))
+      if (!in_folder && (in_folder = file_set[dr1.use.file_id]))
         break;
     }
   }

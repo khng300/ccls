@@ -60,8 +60,8 @@ void MessageHandler::textDocument_references(JsonReader &reader, ReplyOnce &repl
       sym.usr = stack.back();
       stack.pop_back();
       auto fn = [&](Use use, SymbolKind parent_kind) {
-        if (file_set[use.file_id] && Role(use.role & param.role) == param.role && !(use.role & param.excludeRole) &&
-            seen_uses.insert(use).second)
+        if (file_set[use.file_id] && Role(use.ref.role & param.role) == param.role &&
+            !(use.ref.role & param.excludeRole) && seen_uses.insert(use).second)
           if (auto loc = getLsLocation(db, wfiles, use))
             result.push_back(*loc);
       };

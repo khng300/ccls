@@ -20,7 +20,7 @@ WorkspaceEdit buildWorkspaceEdit(DB *db, WorkingFiles *wfiles, SymbolRef sym, st
   eachOccurrence(db, sym, true, [&](Use use) {
     int file_id = use.file_id;
     const QueryFile &file = db->getFile(file_id);
-    if (!file.def || !edited[file_id].insert(use.range).second)
+    if (!file.def || !edited[file_id].insert(use.ref.range).second)
       return;
     std::optional<Location> loc = getLsLocation(db, wfiles, use);
     if (!loc)
