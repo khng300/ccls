@@ -47,7 +47,7 @@ std::pair<std::optional<MarkedString>, std::optional<MarkedString>> getHover(DB 
   const char *comments = nullptr;
   std::optional<MarkedString> ls_comments, hover;
   withEntity(db, sym, [&](const auto &entity) {
-    allOf(entity.defs(db), [&](const auto &d) {
+    allOf(entity.defs(), [&](const auto &d) {
       if (!comments && d.comments.size())
         comments = d.comments.data();
       if (d.spell) {
@@ -66,7 +66,7 @@ std::pair<std::optional<MarkedString>, std::optional<MarkedString>> getHover(DB 
       }
       return true;
     });
-    if (auto c = entity.defs(db); !hover && c.size()) {
+    if (auto c = entity.defs(); !hover && c.size()) {
       auto &d = *c.begin();
       hover = {languageIdentifier(lang)};
       if (d.hover.size())

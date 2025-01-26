@@ -107,37 +107,37 @@ void MessageHandler::textDocument_codeLens(TextDocumentParam &param, ReplyOnce &
       continue;
     switch (sym.sr.kind) {
     case Kind::Func: {
-      const QueryFunc &func = db->getFunc(sym.sr);
-      auto def = func.anyDef(db);
+      QueryFunc func = db->getFunc(sym.sr);
+      auto def = func.anyDef();
       if (!def)
         continue;
       std::vector<Use> base_uses = getUsesForAllBases(db, func);
       std::vector<Use> derived_uses = getUsesForAllDerived(db, func);
-      add("ref", {sym.sr.usr, Kind::Func, "uses"}, sym.sr.range, func.uses(db).size(), base_uses.empty());
+      add("ref", {sym.sr.usr, Kind::Func, "uses"}, sym.sr.range, func.uses().size(), base_uses.empty());
       if (base_uses.size())
         add("b.ref", {sym.sr.usr, Kind::Func, "bases uses"}, sym.sr.range, base_uses.size());
       if (derived_uses.size())
         add("d.ref", {sym.sr.usr, Kind::Func, "derived uses"}, sym.sr.range, derived_uses.size());
       if (base_uses.empty())
         add("base", {sym.sr.usr, Kind::Func, "bases"}, sym.sr.range, def->bases.size());
-      add("derived", {sym.sr.usr, Kind::Func, "derived"}, sym.sr.range, func.deriveds(db).size());
+      add("derived", {sym.sr.usr, Kind::Func, "derived"}, sym.sr.range, func.deriveds().size());
       break;
     }
     case Kind::Type: {
-      const QueryType &type = db->getType(sym.sr);
-      add("ref", {sym.sr.usr, Kind::Type, "uses"}, sym.sr.range, type.uses(db).size(), true);
-      add("derived", {sym.sr.usr, Kind::Type, "derived"}, sym.sr.range, type.deriveds(db).size());
-      add("var", {sym.sr.usr, Kind::Type, "instances"}, sym.sr.range, type.instances(db).size());
+      QueryType type = db->getType(sym.sr);
+      add("ref", {sym.sr.usr, Kind::Type, "uses"}, sym.sr.range, type.uses().size(), true);
+      add("derived", {sym.sr.usr, Kind::Type, "derived"}, sym.sr.range, type.deriveds().size());
+      add("var", {sym.sr.usr, Kind::Type, "instances"}, sym.sr.range, type.instances().size());
       break;
     }
     case Kind::Var: {
-      const QueryVar &var = db->getVar(sym.sr);
-      auto def = var.anyDef(db);
+      QueryVar var = db->getVar(sym.sr);
+      auto def = var.anyDef();
       if (!def)
         continue;
       if (!def || (def->is_local() && !g_config->codeLens.localVariables))
         continue;
-      add("ref", {sym.sr.usr, Kind::Var, "uses"}, sym.sr.range, var.uses(db).size(), def->kind != SymbolKind::Macro);
+      add("ref", {sym.sr.usr, Kind::Var, "uses"}, sym.sr.range, var.uses().size(), def->kind != SymbolKind::Macro);
       break;
     }
     case Kind::File:
@@ -172,37 +172,37 @@ void MessageHandler::workspace_executeCommand(JsonReader &reader, ReplyOnce &rep
     };
     switch (cmd.kind) {
     case Kind::Func: {
-      const QueryFunc &func = db->getFunc(cmd.usr);
+      QueryFunc func = db->getFunc(cmd.usr);
       if (cmd.field == "bases") {
-        auto def = func.anyDef(db);
+        auto def = func.anyDef();
         if (def)
           map(getFuncDeclarations(db, {def->bases.begin(), def->bases.end()}));
       } else if (cmd.field == "bases uses") {
         map(getUsesForAllBases(db, func));
       } else if (cmd.field == "derived") {
-        map(getFuncDeclarations(db, func.deriveds(db)));
+        map(getFuncDeclarations(db, func.deriveds()));
       } else if (cmd.field == "derived uses") {
         map(getUsesForAllDerived(db, func));
       } else if (cmd.field == "uses") {
-        map(func.uses(db));
+        map(func.uses());
       }
       break;
     }
     case Kind::Type: {
-      const QueryType &type = db->getType(cmd.usr);
+      QueryType type = db->getType(cmd.usr);
       if (cmd.field == "derived") {
-        map(getTypeDeclarations(db, type.deriveds(db)));
+        map(getTypeDeclarations(db, type.deriveds()));
       } else if (cmd.field == "instances") {
-        map(getTypeDeclarations(db, type.instances(db)));
+        map(getTypeDeclarations(db, type.instances()));
       } else if (cmd.field == "uses") {
-        map(type.uses(db));
+        map(type.uses());
       }
       break;
     }
     case Kind::Var: {
-      const QueryVar &var = db->getVar(cmd.usr);
+      QueryVar var = db->getVar(cmd.usr);
       if (cmd.field == "uses") {
-        map(var.uses(db));
+        map(var.uses());
       }
       break;
     }

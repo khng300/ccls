@@ -174,7 +174,7 @@ void MessageHandler::textDocument_documentSymbol(JsonReader &reader, ReplyOnce &
             ds->range = *range1;
       }
       withEntity(db, sym, [&](const auto &entity) {
-        auto def = entity.anyDef(db);
+        auto def = entity.anyDef();
         if (!def)
           return;
         ds->name = def->name(false);
@@ -202,8 +202,8 @@ void MessageHandler::textDocument_documentSymbol(JsonReader &reader, ReplyOnce &
       if (refcnt <= 0 || !allows(sym))
         continue;
       if (std::optional<SymbolInformation> info = getSymbolInfo(db, sym, false)) {
-        if ((sym.sr.kind == Kind::Type && ignore(db->getType(sym).anyDef(db))) ||
-            (sym.sr.kind == Kind::Var && ignore(db->getVar(sym).anyDef(db))))
+        if ((sym.sr.kind == Kind::Type && ignore(db->getType(sym).anyDef())) ||
+            (sym.sr.kind == Kind::Var && ignore(db->getVar(sym).anyDef())))
           continue;
         if (auto loc = getLsLocation(db, wfiles, sym, file_id)) {
           info->location = *loc;
@@ -237,7 +237,7 @@ void MessageHandler::textDocument_switchSourceHeader(TextDocumentIdentifier &par
 
     if (is_hdr) {
       withEntity(db, sym, [&](const auto &entity) {
-        for (const auto &def : entity.defs(db))
+        for (const auto &def : entity.defs())
           if (def.spell && def.file_id != file_id)
             ++file_id2cnt[def.file_id];
       });

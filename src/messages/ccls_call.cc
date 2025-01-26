@@ -64,8 +64,8 @@ REFLECT_STRUCT(Out_outgoingCall, to, fromRanges);
 
 bool expand(MessageHandler *m, DB *db, Out_cclsCall *entry, bool callee, CallType call_type, bool qualified,
             int levels) {
-  const QueryFunc &func = db->getFunc(entry->usr);
-  auto def = func.anyDef(db);
+  QueryFunc func = db->getFunc(entry->usr);
+  auto def = func.anyDef();
   entry->numChildren = 0;
   if (!def)
     return false;
@@ -84,12 +84,12 @@ bool expand(MessageHandler *m, DB *db, Out_cclsCall *entry, bool callee, CallTyp
   };
   auto handle_uses = [&](const QueryFunc &func, CallType call_type) {
     if (callee) {
-      if (auto def = func.anyDef(db))
+      if (auto def = func.anyDef())
         for (SymbolRef sym : def->callees)
           if (sym.kind == Kind::Func)
             handle(sym, def->file_id, call_type);
     } else {
-      auto uses = func.uses(db);
+      auto uses = func.uses();
       if (uses.size() != 0) {
         Use use = *uses.begin();
         const QueryFile &file1 = db->getFile(use.file_id);
@@ -107,22 +107,22 @@ bool expand(MessageHandler *m, DB *db, Out_cclsCall *entry, bool callee, CallTyp
 
   std::unordered_set<Usr> seen;
   seen.insert(func.usr);
-  std::vector<const QueryFunc *> stack;
+  std::vector<QueryFunc> stack;
   entry->name = def->name(qualified);
   handle_uses(func, CallType::Direct);
 
   // Callers/callees of base functions.
   if (call_type & CallType::Base) {
-    stack.push_back(&func);
+    stack.push_back(func);
     while (stack.size()) {
-      const QueryFunc &func1 = *stack.back();
+      QueryFunc func1 = stack.back();
       stack.pop_back();
-      if (func1.anyDef(db)) {
+      if (func1.anyDef()) {
         auto bases = def->bases;
         eachDefinedFunc(db, bases, [&](const QueryFunc &func2) {
           if (!seen.count(func2.usr)) {
             seen.insert(func2.usr);
-            stack.push_back(&func2);
+            stack.push_back(func2);
             handle_uses(func2, CallType::Base);
           }
         });
@@ -132,19 +132,19 @@ bool expand(MessageHandler *m, DB *db, Out_cclsCall *entry, bool callee, CallTyp
 
   // Callers/callees of derived functions.
   if (call_type & CallType::Derived) {
-    stack.push_back(&func);
+    stack.push_back(func);
     while (stack.size()) {
-      const QueryFunc &func1 = *stack.back();
+      QueryFunc func1 = stack.back();
       stack.pop_back();
       auto fn = [&](const QueryFunc &func2) {
         if (!seen.count(func2.usr)) {
           seen.insert(func2.usr);
-          stack.push_back(&func2);
+          stack.push_back(func2);
           handle_uses(func2, CallType::Derived);
         }
         return true;
       };
-      eachDefinedFunc(db, func1.deriveds(db), fn);
+      eachDefinedFunc(db, func1.deriveds(), fn);
     }
   }
 
@@ -155,8 +155,8 @@ bool expand(MessageHandler *m, DB *db, Out_cclsCall *entry, bool callee, CallTyp
 
 std::optional<Out_cclsCall> buildInitial(MessageHandler *m, DB *db, Usr root_usr, bool callee, CallType call_type,
                                          bool qualified, int levels) {
-  const QueryFunc &func = db->getFunc(root_usr);
-  auto def = func.anyDef(db);
+  QueryFunc func = db->getFunc(root_usr);
+  auto def = func.anyDef();
   if (!def)
     return {};
 
@@ -221,7 +221,7 @@ void MessageHandler::textDocument_prepareCallHierarchy(TextDocumentPositionParam
   for (SymbolRef sym : findSymbolsAtLocation(wf, &*file, param.position)) {
     if (sym.kind != Kind::Func)
       continue;
-    auto def = db->getFunc(sym.usr).anyDef(db);
+    auto def = db->getFunc(sym.usr).anyDef();
     if (!def)
       continue;
     auto r = getLsRange(wf, sym.range);
@@ -263,8 +263,8 @@ static std::vector<Out> toCallResult(DB *db,
     default:
       continue;
     case Kind::Func: {
-      const QueryFunc &func = db->getFunc(sym.usr);
-      auto def = func.anyDef(db);
+      QueryFunc func = db->getFunc(sym.usr);
+      auto def = func.anyDef();
       if (!def)
         continue;
       item.name = def->name(false);
@@ -288,9 +288,9 @@ void MessageHandler::callHierarchy_incomingCalls(CallsParam &param, ReplyOnce &r
   }
   auto txn = TxnManager::begin(qs, true);
   auto db = txn.db();
-  const QueryFunc &func = db->getFunc(usr);
+  QueryFunc func = db->getFunc(usr);
   std::map<SymbolIdx, std::pair<int, std::vector<lsRange>>> sym2ranges;
-  forEach(func.uses(db), [&](Use use) {
+  forEach(func.uses(), [&](Use use) {
     const QueryFile &file = db->getFile(use.file_id);
     Maybe<ExtentRef> best;
     for (auto [sym, refcnt] : file.symbol2refcnt)
@@ -312,9 +312,9 @@ void MessageHandler::callHierarchy_outgoingCalls(CallsParam &param, ReplyOnce &r
   }
   auto txn = TxnManager::begin(qs, true);
   auto db = txn.db();
-  const QueryFunc &func = db->getFunc(usr);
+  QueryFunc func = db->getFunc(usr);
   std::map<SymbolIdx, std::pair<int, std::vector<lsRange>>> sym2ranges;
-  if (auto def = func.anyDef(db))
+  if (auto def = func.anyDef())
     for (SymbolRef sym : def->callees)
       if (sym.kind == Kind::Func) {
         add(sym2ranges, sym, def->file_id);

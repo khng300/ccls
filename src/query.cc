@@ -536,15 +536,15 @@ std::string DB::getSymbolName(SymbolIdx sym, bool qualified) const {
     }
   } break;
   case Kind::Func:
-    if (const auto &def = getFunc(usr).anyDef(this))
+    if (const auto &def = getFunc(usr).anyDef())
       return std::string(def->name(qualified));
     break;
   case Kind::Type:
-    if (const auto &def = getType(usr).anyDef(this))
+    if (const auto &def = getType(usr).anyDef())
       return std::string(def->name(qualified));
     break;
   case Kind::Var:
-    if (const auto &def = getVar(usr).anyDef(this))
+    if (const auto &def = getVar(usr).anyDef())
       return std::string(def->name(qualified));
     break;
   }
@@ -649,17 +649,17 @@ Maybe<DeclRef> getDefinitionSpell(DB *db, SymbolIdx sym) {
 template <typename C> std::vector<Use> getDeclarations(DB *db, Kind kind, C &&usrs) {
   std::vector<Use> ret;
   allOf(usrs, [&](Usr usr) {
-    withEntity(db, {usr, kind}, [db, &ret](const auto &entity) {
+    withEntity(db, {usr, kind}, [&ret](const auto &entity) {
       bool has_def = false;
-      auto defs = entity.defs(db);
-      for (const auto &def : entity.defs(db)) {
+      auto defs = entity.defs();
+      for (const auto &def : entity.defs()) {
         if (def.spell) {
           ret.push_back(*def.spell);
           has_def = true;
         }
       }
       if (!has_def) {
-        for (const auto &dr : entity.decls(db))
+        for (const auto &dr : entity.decls())
           ret.push_back(dr);
       }
     });
@@ -673,7 +673,7 @@ template <typename RangeType> std::vector<DeclRef> getVarDeclarationsImpl(DB *db
   forEach(usrs, [&](Usr usr) {
     bool has_def = false;
     auto entity = db->getFunc(usr);
-    for (const auto &def : entity.defs(db)) {
+    for (const auto &def : entity.defs()) {
       if (def.spell) {
         has_def = true;
         // See messages/ccls_vars.cc
@@ -692,7 +692,7 @@ template <typename RangeType> std::vector<DeclRef> getVarDeclarationsImpl(DB *db
       }
     }
     if (!has_def) {
-      for (const auto &dr : entity.decls(db))
+      for (const auto &dr : entity.decls())
         ret.push_back(dr);
     }
   });
@@ -718,7 +718,7 @@ std::vector<DeclRef> getVarDeclarations(DB *db, SubdbContainer<EntityID, Usr> &u
 std::vector<DeclRef> getNonDefDeclarations(DB *db, SymbolIdx sym) {
   std::vector<DeclRef> ret;
   withEntity(db, sym, [&](const auto &e) {
-    for (const auto &dr : e.decls(db))
+    for (const auto &dr : e.decls())
       ret.push_back(dr);
   });
   return ret;
@@ -726,19 +726,19 @@ std::vector<DeclRef> getNonDefDeclarations(DB *db, SymbolIdx sym) {
 
 std::vector<Use> getUsesForAllBases(DB *db, const QueryFunc &root) {
   std::vector<Use> ret;
-  std::vector<const QueryFunc *> stack{&root};
+  std::vector<QueryFunc> stack{root};
   std::unordered_set<Usr> seen;
   seen.insert(root.usr);
   while (!stack.empty()) {
-    const QueryFunc &func = *stack.back();
+    QueryFunc func = stack.back();
     stack.pop_back();
-    if (auto def = func.anyDef(db)) {
+    if (auto def = func.anyDef()) {
       const auto &bases = def->bases;
       eachDefinedFunc(db, bases, [&](const QueryFunc &func1) {
         if (!seen.count(func1.usr)) {
           seen.insert(func1.usr);
-          stack.push_back(&func1);
-          for (const auto &use : func1.uses(db))
+          stack.push_back(func1);
+          for (const auto &use : func1.uses())
             ret.push_back(use);
         }
       });
@@ -750,17 +750,17 @@ std::vector<Use> getUsesForAllBases(DB *db, const QueryFunc &root) {
 
 std::vector<Use> getUsesForAllDerived(DB *db, const QueryFunc &root) {
   std::vector<Use> ret;
-  std::vector<const QueryFunc *> stack{&root};
+  std::vector<QueryFunc> stack{root};
   std::unordered_set<Usr> seen;
   seen.insert(root.usr);
   while (!stack.empty()) {
-    const QueryFunc &func = *stack.back();
+    QueryFunc func = stack.back();
     stack.pop_back();
-    eachDefinedFunc(db, func.deriveds(db), [&](const QueryFunc &func1) {
+    eachDefinedFunc(db, func.deriveds(), [&](const QueryFunc &func1) {
       if (!seen.count(func1.usr)) {
         seen.insert(func1.usr);
-        stack.push_back(&func1);
-        for (const auto &use : func1.uses(db))
+        stack.push_back(func1);
+        for (const auto &use : func1.uses())
           ret.push_back(use);
       }
     });
@@ -848,7 +848,7 @@ SymbolKind getSymbolKind(DB *db, SymbolIdx sym) {
   else {
     ret = SymbolKind::Unknown;
     withEntity(db, sym, [&](const auto &entity) {
-      auto defs = entity.defs(db);
+      auto defs = entity.defs();
       if (defs.size() != 0)
         ret = defs.begin()->kind;
     });

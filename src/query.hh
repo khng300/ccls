@@ -158,13 +158,15 @@ struct alignas(16) QueryVarDef : NameMixin<QueryVarDef> {
   }
 };
 
-template <typename QType, typename QDef> struct QueryObject : QueryEntity {
-  using Type = QType;
+template <typename QType, typename QDef> struct QueryObject {
   using Def = QDef;
+  EntityID id;
+  Usr usr;
+  Kind kind;
 
-  const Def *anyDef(const DB *db) const {
+  const Def *anyDef() const {
     const Def *ret = nullptr;
-    allOf(defs(db), [&](auto &&def) {
+    allOf(defs(), [&](auto &&def) {
       ret = &def;
       if (ret->spell)
         return false;
@@ -174,32 +176,41 @@ template <typename QType, typename QDef> struct QueryObject : QueryEntity {
   }
 
 protected:
-  SubdbContainer<EntityID, Def> defs(const DB *db) const;
-  SubdbContainer<EntityID, DeclRef> decls(const DB *db) const;
-  SubdbContainer<EntityID, Use> uses(const DB *db) const;
-  SubdbContainer<EntityID, Usr> deriveds(const DB *db) const;
-  SubdbContainer<EntityID, Usr> instances(const DB *db) const;
+  friend class DB;
+
+  QueryObject(const DB *db, const QueryEntity &e) : id(e.id), usr(e.usr), kind(e.kind), db_(db) {}
+
+  SubdbContainer<EntityID, Def> defs() const;
+  SubdbContainer<EntityID, DeclRef> decls() const;
+  SubdbContainer<EntityID, Use> uses() const;
+  SubdbContainer<EntityID, Usr> deriveds() const;
+  SubdbContainer<EntityID, Usr> instances() const;
+
+  const DB *db_;
 };
 
 struct QueryFunc : QueryObject<QueryFunc, QueryFuncDef> {
-  SubdbContainer<EntityID, Def> defs(const DB *db) const { return QueryObject::defs(db); }
-  SubdbContainer<EntityID, DeclRef> decls(const DB *db) const { return QueryObject::decls(db); }
-  SubdbContainer<EntityID, Use> uses(const DB *db) const { return QueryObject::uses(db); }
-  SubdbContainer<EntityID, Usr> deriveds(const DB *db) const { return QueryObject::deriveds(db); }
+  QueryFunc(const QueryObject &object) : QueryObject(object) {}
+  SubdbContainer<EntityID, Def> defs() const { return QueryObject::defs(); }
+  SubdbContainer<EntityID, DeclRef> decls() const { return QueryObject::decls(); }
+  SubdbContainer<EntityID, Use> uses() const { return QueryObject::uses(); }
+  SubdbContainer<EntityID, Usr> deriveds() const { return QueryObject::deriveds(); }
 };
 
 struct QueryType : QueryObject<QueryType, QueryTypeDef> {
-  SubdbContainer<EntityID, Def> defs(const DB *db) const { return QueryObject::defs(db); }
-  SubdbContainer<EntityID, DeclRef> decls(const DB *db) const { return QueryObject::decls(db); }
-  SubdbContainer<EntityID, Use> uses(const DB *db) const { return QueryObject::uses(db); }
-  SubdbContainer<EntityID, Usr> deriveds(const DB *db) const { return QueryObject::deriveds(db); }
-  SubdbContainer<EntityID, Usr> instances(const DB *db) const { return QueryObject::instances(db); }
+  QueryType(const QueryObject &object) : QueryObject(object) {}
+  SubdbContainer<EntityID, Def> defs() const { return QueryObject::defs(); }
+  SubdbContainer<EntityID, DeclRef> decls() const { return QueryObject::decls(); }
+  SubdbContainer<EntityID, Use> uses() const { return QueryObject::uses(); }
+  SubdbContainer<EntityID, Usr> deriveds() const { return QueryObject::deriveds(); }
+  SubdbContainer<EntityID, Usr> instances() const { return QueryObject::instances(); }
 };
 
 struct QueryVar : QueryObject<QueryVar, QueryVarDef> {
-  SubdbContainer<EntityID, Def> defs(const DB *db) const { return QueryObject::defs(db); }
-  SubdbContainer<EntityID, DeclRef> decls(const DB *db) const { return QueryObject::decls(db); }
-  SubdbContainer<EntityID, Use> uses(const DB *db) const { return QueryObject::uses(db); }
+  QueryVar(const QueryObject &object) : QueryObject(object) {}
+  SubdbContainer<EntityID, Def> defs() const { return QueryObject::defs(); }
+  SubdbContainer<EntityID, DeclRef> decls() const { return QueryObject::decls(); }
+  SubdbContainer<EntityID, Use> uses() const { return QueryObject::uses(); }
 };
 
 template <typename T> using Update = std::unordered_map<Usr, std::pair<std::vector<T>, std::vector<T>>>;
@@ -320,18 +331,19 @@ public:
   bool hasType(Usr usr) const { return hasEntityId(Kind::Type, usr); }
   bool hasVar(Usr usr) const { return hasEntityId(Kind::Var, usr); }
 
-  const QueryFunc &id2Func(EntityID id) const { return static_cast<const QueryFunc &>(id2Entity(id)); }
-  const QueryType &id2Type(EntityID id) const { return static_cast<const QueryType &>(id2Entity(id)); }
-  const QueryVar &id2Var(EntityID id) const { return static_cast<const QueryVar &>(id2Entity(id)); }
+  QueryFunc id2Func(EntityID id) const { return QueryObject<QueryFunc, QueryFunc::Def>(this, id2Entity(id)); }
+  QueryType id2Type(EntityID id) const { return QueryObject<QueryType, QueryType::Def>(this, id2Entity(id)); }
+  QueryVar id2Var(EntityID id) const { return QueryObject<QueryVar, QueryVar::Def>(this, id2Entity(id)); }
 
-  const QueryFunc &getFunc(Usr usr) const { return id2Func(EntityID(Kind::Func, usr)); }
-  const QueryType &getType(Usr usr) const { return id2Type(EntityID(Kind::Type, usr)); }
-  const QueryVar &getVar(Usr usr) const { return id2Var(EntityID(Kind::Var, usr)); }
+  QueryFunc getFunc(Usr usr) const { return id2Func(EntityID(Kind::Func, usr)); }
+  QueryType getType(Usr usr) const { return id2Type(EntityID(Kind::Type, usr)); }
+  QueryVar getVar(Usr usr) const { return id2Var(EntityID(Kind::Var, usr)); }
+
+  QueryFunc getFunc(SymbolIdx ref) const { return getFunc(ref.usr); }
+  QueryType getType(SymbolIdx ref) const { return getType(ref.usr); }
+  QueryVar getVar(SymbolIdx ref) const { return getVar(ref.usr); }
 
   const QueryFile &getFile(int file_id) const;
-  const QueryFunc &getFunc(SymbolIdx ref) const { return getFunc(ref.usr); }
-  const QueryType &getType(SymbolIdx ref) const { return getType(ref.usr); }
-  const QueryVar &getVar(SymbolIdx ref) const { return getVar(ref.usr); }
 
   DbContainer<int, QueryFile> files() const;
   SubdbContainer<Kind, EntityID> allUsrs(Kind kind) const;
@@ -389,25 +401,20 @@ private:
   std::unique_ptr<DB> db_;
 };
 
-template <typename QType, typename QDef>
-auto QueryObject<QType, QDef>::defs(const DB *db) const -> SubdbContainer<EntityID, Def> {
-  return SubdbContainer<EntityID, QDef>(db->txn_, db->qs_.entities_defs, id);
+template <typename QType, typename QDef> auto QueryObject<QType, QDef>::defs() const -> SubdbContainer<EntityID, Def> {
+  return SubdbContainer<EntityID, QDef>(db_->txn_, db_->qs_.entities_defs, id);
 }
-template <typename QType, typename QDef>
-SubdbContainer<EntityID, DeclRef> QueryObject<QType, QDef>::decls(const DB *db) const {
-  return SubdbContainer<EntityID, DeclRef>(db->txn_, db->qs_.entities_declarations, id);
+template <typename QType, typename QDef> SubdbContainer<EntityID, DeclRef> QueryObject<QType, QDef>::decls() const {
+  return SubdbContainer<EntityID, DeclRef>(db_->txn_, db_->qs_.entities_declarations, id);
 }
-template <typename QType, typename QDef>
-SubdbContainer<EntityID, Use> QueryObject<QType, QDef>::uses(const DB *db) const {
-  return SubdbContainer<EntityID, Use>(db->txn_, db->qs_.entities_uses, id);
+template <typename QType, typename QDef> SubdbContainer<EntityID, Use> QueryObject<QType, QDef>::uses() const {
+  return SubdbContainer<EntityID, Use>(db_->txn_, db_->qs_.entities_uses, id);
 }
-template <typename QType, typename QDef>
-SubdbContainer<EntityID, Usr> QueryObject<QType, QDef>::deriveds(const DB *db) const {
-  return SubdbContainer<EntityID, Usr>(db->txn_, db->qs_.entities_derived, id);
+template <typename QType, typename QDef> SubdbContainer<EntityID, Usr> QueryObject<QType, QDef>::deriveds() const {
+  return SubdbContainer<EntityID, Usr>(db_->txn_, db_->qs_.entities_derived, id);
 }
-template <typename QType, typename QDef>
-SubdbContainer<EntityID, Usr> QueryObject<QType, QDef>::instances(const DB *db) const {
-  return SubdbContainer<EntityID, Usr>(db->txn_, db->qs_.entities_instances, id);
+template <typename QType, typename QDef> SubdbContainer<EntityID, Usr> QueryObject<QType, QDef>::instances() const {
+  return SubdbContainer<EntityID, Usr>(db_->txn_, db_->qs_.entities_instances, id);
 }
 
 Maybe<DeclRef> getDefinitionSpell(DB *db, SymbolIdx sym);
@@ -484,7 +491,7 @@ template <typename Fn> void withEntity(DB *db, SymbolIdx sym, Fn &&fn) {
 
 template <typename Fn> void eachEntityDef(DB *db, SymbolIdx sym, Fn &&fn) {
   withEntity(db, sym, [&](const auto &entity) {
-    allOf(entity.defs(db), [&fn](auto &&def) {
+    allOf(entity.defs(), [&fn](auto &&def) {
       if (!fn(def))
         return false;
       return true;
@@ -494,13 +501,13 @@ template <typename Fn> void eachEntityDef(DB *db, SymbolIdx sym, Fn &&fn) {
 
 template <typename Fn> void eachOccurrence(DB *db, SymbolIdx sym, bool include_decl, Fn &&fn) {
   withEntity(db, sym, [&](const auto &entity) {
-    forEach(entity.uses(db), [&fn](auto &&use) { fn(use); });
+    forEach(entity.uses(), [&fn](auto &&use) { fn(use); });
     if (include_decl) {
-      forEach(entity.defs(db), [&fn](auto &&def) {
+      forEach(entity.defs(), [&fn](auto &&def) {
         if (def.spell)
           fn(*def.spell);
       });
-      forEach(entity.decls(db), [&fn](auto &&dr) { fn(dr); });
+      forEach(entity.decls(), [&fn](auto &&dr) { fn(dr); });
     }
   });
 }
@@ -509,8 +516,8 @@ SymbolKind getSymbolKind(DB *db, SymbolIdx sym);
 
 template <typename C, typename Fn> void eachDefinedFunc(DB *db, C &&usrs, Fn &&fn) {
   forEach(usrs, [&](auto usr) {
-    const auto &obj = db->getFunc(usr);
-    if (obj.defs(db).size() != 0)
+    auto obj = db->getFunc(usr);
+    if (obj.defs().size() != 0)
       fn(obj);
   });
 }

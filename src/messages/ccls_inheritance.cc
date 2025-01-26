@@ -45,14 +45,14 @@ bool expand(MessageHandler *m, DB *db, Out_cclsInheritance *entry, bool derived,
 template <typename Q>
 bool expandHelper(MessageHandler *m, DB *db, Out_cclsInheritance *entry, bool derived, bool qualified, int levels,
                   Q &&entity) {
-  auto def = entity.anyDef(db);
+  auto def = entity.anyDef();
   if (def) {
     entry->name = def->name(qualified);
     if (def->spell) {
       if (auto loc = getLsLocation(db, m->wfiles, *def->spell))
         entry->location = *loc;
     } else {
-      auto decls = entity.decls(db);
+      auto decls = entity.decls();
       if (auto dr = decls.begin(); dr != decls.end())
         if (auto loc = getLsLocation(db, m->wfiles, *dr))
           entry->location = *loc;
@@ -64,7 +64,7 @@ bool expandHelper(MessageHandler *m, DB *db, Out_cclsInheritance *entry, bool de
   std::unordered_set<Usr> seen;
   if (derived) {
     if (levels > 0) {
-      forEach(entity.deriveds(db), [&](auto usr) {
+      forEach(entity.deriveds(), [&](auto usr) {
         if (!seen.insert(usr).second)
           return;
         Out_cclsInheritance entry1;
@@ -76,7 +76,7 @@ bool expandHelper(MessageHandler *m, DB *db, Out_cclsInheritance *entry, bool de
       });
       entry->numChildren = int(entry->children.size());
     } else
-      entry->numChildren = int(entity.deriveds(db).size());
+      entry->numChildren = int(entity.deriveds().size());
   } else {
     if (levels > 0) {
       for (auto usr : def->bases) {

@@ -33,16 +33,16 @@ void MessageHandler::ccls_vars(JsonReader &reader, ReplyOnce &reply) {
     default:
       break;
     case Kind::Var: {
-      const QueryVar &var = db->getVar(sym);
-      auto def = var.anyDef(db);
+      QueryVar var = db->getVar(sym);
+      auto def = var.anyDef();
       if (!def || !def->type)
         continue;
       usr = def->type;
       [[fallthrough]];
     }
     case Kind::Type: {
-      const QueryType &type = db->getType(usr);
-      for (DeclRef dr : getVarDeclarations(db, type.instances(db), param.kind))
+      QueryType type = db->getType(usr);
+      for (DeclRef dr : getVarDeclarations(db, type.instances(), param.kind))
         if (auto loc = getLocationLink(db, wfiles, dr))
           result.push_back(Location(std::move(loc)));
       break;

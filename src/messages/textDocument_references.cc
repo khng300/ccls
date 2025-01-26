@@ -67,7 +67,7 @@ void MessageHandler::textDocument_references(JsonReader &reader, ReplyOnce &repl
       };
       withEntity(db, sym, [&](const auto &entity) {
         SymbolKind parent_kind = SymbolKind::Unknown;
-        allOf(entity.defs(db), [&](const auto &def) {
+        allOf(entity.defs(), [&](const auto &def) {
           if (def.spell) {
             parent_kind = getSymbolKind(db, sym);
             if (param.base)
@@ -80,13 +80,13 @@ void MessageHandler::textDocument_references(JsonReader &reader, ReplyOnce &repl
           }
           return true;
         });
-        forEach(entity.uses(db), [&](auto use) { fn(use, parent_kind); });
+        forEach(entity.uses(), [&](auto use) { fn(use, parent_kind); });
         if (param.context.includeDeclaration) {
-          forEach(entity.defs(db), [&](const auto &def) {
+          forEach(entity.defs(), [&](const auto &def) {
             if (def.spell)
               fn(*def.spell, parent_kind);
           });
-          forEach(entity.decls(db), [&](auto dr) { fn(dr, parent_kind); });
+          forEach(entity.decls(), [&](auto dr) { fn(dr, parent_kind); });
         }
       });
     }

@@ -307,8 +307,8 @@ static std::unordered_map<SymbolIdx, CclsSemanticHighlightSymbol> computeSemanti
     // highlighted.
     switch (sym.sr.kind) {
     case Kind::Func: {
-      const auto &func = db->getFunc(sym.sr.usr);
-      auto def = func.anyDef(db);
+      auto func = db->getFunc(sym.sr.usr);
+      auto def = func.anyDef();
       if (!def)
         continue; // applies to for loop
       // Don't highlight overloadable operators or implicit lambda ->
@@ -339,8 +339,8 @@ static std::unordered_map<SymbolIdx, CclsSemanticHighlightSymbol> computeSemanti
       break;
     }
     case Kind::Type: {
-      const auto &type = db->getType(sym.sr.usr);
-      allOf(type.defs(db), [&](const auto &def) {
+      auto type = db->getType(sym.sr.usr);
+      allOf(type.defs(), [&](const auto &def) {
         kind = def.kind;
         detailed_name = def.detailed_name;
         if (def.spell) {
@@ -352,8 +352,8 @@ static std::unordered_map<SymbolIdx, CclsSemanticHighlightSymbol> computeSemanti
       break;
     }
     case Kind::Var: {
-      const auto &var = db->getVar(sym.sr.usr);
-      allOf(var.defs(db), [&](const auto &def) {
+      auto var = db->getVar(sym.sr.usr);
+      allOf(var.defs(), [&](const auto &def) {
         kind = def.kind;
         storage = def.storage;
         detailed_name = def.detailed_name;

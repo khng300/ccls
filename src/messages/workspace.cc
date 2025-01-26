@@ -109,7 +109,7 @@ bool addSymbol(DB *db, WorkingFiles *wfiles, const std::vector<uint8_t> &file_se
   Maybe<DeclRef> dr;
   bool in_folder = false;
   withEntity(db, sym, [&](const auto &entity) {
-    allOf(entity.defs(db), [&](const auto &def) {
+    allOf(entity.defs(), [&](const auto &def) {
       if (def.spell) {
         dr = def.spell;
         if (!in_folder && (in_folder = file_set[def.spell->use.file_id]))
@@ -167,7 +167,7 @@ void MessageHandler::workspace_symbol(WorkspaceSymbolParam &param, ReplyOnce &re
   };
 
   if (!allOf(db->allUsrs(Kind::Func), [&](const auto id) {
-        const auto &func = db->id2Func(id);
+        auto func = db->id2Func(id);
         if (add({func.usr, Kind::Func}))
           return false;
         return true;
@@ -175,7 +175,7 @@ void MessageHandler::workspace_symbol(WorkspaceSymbolParam &param, ReplyOnce &re
     goto done_add;
   }
   if (!allOf(db->allUsrs(Kind::Type), [&](const auto id) {
-        const auto &type = db->id2Type(id);
+        auto type = db->id2Type(id);
         if (add({type.usr, Kind::Type}))
           return false;
         return true;
@@ -183,7 +183,7 @@ void MessageHandler::workspace_symbol(WorkspaceSymbolParam &param, ReplyOnce &re
     goto done_add;
   }
   if (!allOf(db->allUsrs(Kind::Var), [&](const auto id) {
-        const auto &var = db->id2Var(id);
+        auto var = db->id2Var(id);
         if (add({var.usr, Kind::Var}))
           return false;
         return true;

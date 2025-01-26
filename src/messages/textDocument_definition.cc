@@ -122,15 +122,15 @@ void MessageHandler::textDocument_definition(TextDocumentPositionParam &param, R
         }
       };
       forEach(db->allUsrs(Kind::Func), [&](const auto id) {
-        const auto &func = db->id2Func(id);
+        auto func = db->id2Func(id);
         fn({func.usr, Kind::Func});
       });
       forEach(db->allUsrs(Kind::Type), [&](const auto id) {
-        const auto &type = db->id2Type(id);
+        auto type = db->id2Type(id);
         fn({type.usr, Kind::Type});
       });
       forEach(db->allUsrs(Kind::Var), [&](const auto id) {
-        const auto &var = db->id2Var(id);
+        auto var = db->id2Var(id);
         fn({var.usr, Kind::Var});
       });
 
@@ -155,13 +155,13 @@ void MessageHandler::textDocument_typeDefinition(TextDocumentPositionParam &para
 
   std::vector<LocationLink> result;
   auto add = [&](const QueryType &type) {
-    forEach(type.defs(db), [&](const auto &def) {
+    forEach(type.defs(), [&](const auto &def) {
       if (def.spell)
         if (auto loc = getLocationLink(db, wfiles, *def.spell))
           result.push_back(loc);
     });
     if (result.empty()) {
-      forEach(type.decls(db), [&](auto dr) {
+      forEach(type.decls(), [&](auto dr) {
         if (auto loc = getLocationLink(db, wfiles, dr))
           result.push_back(loc);
       });
@@ -170,15 +170,15 @@ void MessageHandler::textDocument_typeDefinition(TextDocumentPositionParam &para
   for (SymbolRef sym : findSymbolsAtLocation(wf, &*file, param.position)) {
     switch (sym.kind) {
     case Kind::Var: {
-      const QueryVar &var = db->getVar(sym);
-      auto def = var.anyDef(db);
+      QueryVar var = db->getVar(sym);
+      auto def = var.anyDef();
       if (def && def->type)
         add(db->getType(def->type));
       break;
     }
     case Kind::Type: {
-      const QueryType &type = db->getType(sym);
-      allOf(type.defs(db), [&](const auto &def) {
+      QueryType type = db->getType(sym);
+      allOf(type.defs(), [&](const auto &def) {
         if (def.alias_of) {
           add(db->getType(def.alias_of));
           return false;
